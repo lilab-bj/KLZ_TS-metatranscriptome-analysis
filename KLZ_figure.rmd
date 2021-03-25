@@ -1,0 +1,1915 @@
+---
+title: "KLZ TS Analysis Tutorial R Notebook"
+output:
+  html_notebook: default
+  pdf_document: default
+---
+
+<!-- #!/usr/bin/R -->
+<!-- #   _  ___     _____  _____ ____    ____  _   _    _     -->
+<!-- #  | |/ / |   |__  / |_   _/ ___|  |  _ \| \ | |  / \    -->
+<!-- #  | ' /| |     / /    | | \___ \  | |_) |  \| | / _ \   -->
+<!-- #  | . \| |___ / /_    | |  ___) | |  _ <| |\  |/ ___ \  -->
+<!-- #  |_|\_\_____/____|   |_| |____/  |_| \_\_| \_/_/   \_\ -->
+<!-- #                                                        -->
+<!-- #                     _           _      -->
+<!-- #    __ _ _ __   __ _| |_   _ ___(_)___  -->
+<!-- #   / _` | '_ \ / _` | | | | / __| / __| -->
+<!-- #  | (_| | | | | (_| | | |_| \__ \ \__ \ -->
+<!-- #   \__,_|_| |_|\__,_|_|\__, |___/_|___/ -->
+<!-- #                       |___/            -->
+<!-- #     -->
+
+### Part1:  loading data and metadata
+```{r,fig.show='hold',fig.width=7, fig.height=6,echo=TRUE,tidy=TRUE}
+### Loading package
+setwd("/home/zhong/Data/Other/Work/2021.3.23")
+pacman::p_load(tidyverse, reshape2,scales, ggpubr, factoextra, FactoMineR, psych, vegan, patchwork, ggsci,pheatmap,survminer,survival,survivalROC,plotROC,ggrepel,corrplot,RMThreshold,SpiecEasi,igraph,metamicrobiomeR,glmnet)
+
+genus=read_csv("genus_all.csv") %>% column_to_rownames("taxname")
+species=read_csv("species_all.csv") %>%.[!duplicated(.[,"taxname"]),] %>% column_to_rownames("taxname")
+## Species filtered by relative abundance and genome coverage
+species_list=read_table("real_taxname.list")
+
+### Merge species which correlation greater than 0.9
+species["Streptococcus parasanguinis", ] <- species["Streptococcus sp. LPB0220", ] + species["Streptococcus parasanguinis", ]
+species <- species[-which(rownames(species) == "Streptococcus sp. LPB0220"), ]
+species["Streptococcus pneumoniae", ] <- species["Streptococcus mitis", ] + species["Streptococcus pneumoniae", ]
+species <- species[-which(rownames(species) == "Streptococcus mitis"), ]
+
+metadata=read_csv("metadata.csv") %>% arrange(Individual_ID,sam2adm) %>% unique()
+metadata1=metadata %>% filter(Death %in% c(0,1),reads_gthan3000=="yes")
+metadata$dis2sam=as.numeric(as.Date(metadata$Dischrge)-as.Date(metadata$Sample.1))
+### 
+map <- metadata %>% arrange(Individual_ID,sam2adm)
+map_A <- map[!duplicated(map$Individual_ID), ] %>% filter(sam2adm <= 2,reads_gthan3000=="yes") %>% as.data.frame()
+rownames(map_A)=map_A$Sample
+map_D <- map[!duplicated(map$Individual_ID, fromLast = T), ] %>% filter(dis2sam < 7,reads_gthan3000=="yes")%>% as.data.frame()
+rownames(map_D)=map_D$Sample
+options(stringsAsFactors = F)
+
+
+```
+
+
+## Figure 2A/B
+```{r,fig.width=6, fig.height=8,echo=TRUE,tidy=TRUE}
+genus_A=t(genus[,metadata %>% filter(Death %in% c(1,0),reads_gthan3000=="yes") %>% .[,"Sample"]] %>% as.matrix() %>% prop.table(.,2) %>% .[rowSums(.>0.01)>0,]%>% .[,map_A$Sample] %>% prop.table(.,2))
+genus_D=t(genus[,metadata %>% filter(Death %in% c(1,0),reads_gthan3000=="yes") %>% .[,"Sample"]] %>% as.matrix() %>% prop.table(.,2) %>% .[rowSums(.>0.01)>0,] %>% .[,map_D$Sample]%>% prop.table(.,2))
+
+colnames(genus_A) <- paste("k__bacteria.g__",colnames(genus_A),sep = "")
+colnames(genus_D) <- paste("k__bacteria.g__",colnames(genus_D),sep = "")
+ genus_D=genus_D[,colSums(genus_D>1e-4)>16]
+env1 <- dplyr::select(map_A,Sample,Age,Gender,CORTICOSTEROID,Death,
+                      COMORBIDITY,Treatment,Severity_A,Copy,ANTB_CLS3_STATUS,
+                      Individual_ID)
+rownames(env1)=env1$Sample
+env1=env1[rownames(genus_A),]
+env1$CORTICOSTEROID=as.factor(env1$CORTICOSTEROID)
+env1$Severity_A=as.factor(env1$Severity_A)
+env1$Death=as.factor(env1$Death)
+env1$ANTB_CLS3_STATUS=as.factor(env1$ANTB_CLS3_STATUS)
+env1$COMORBIDITY=as.factor(env1$COMORBIDITY)
+all(rownames(genus_A) == env1$Sample)
+df1 <- cbind(env1,genus_A)
+df1$Death <- as.factor(df1$Death)
+gamlss_t1 <- taxa.compare(taxtab =df1,propmed.rel="gamlss",comvar="Death",
+                          personid = "Individual_ID",adjustvar =c("CORTICOSTEROID","Treatment","Gender","Age","Severity_A","COMORBIDITY","ANTB_CLS3_STATUS"),
+                          p.adjust.method="fdr" ,relabund.filter = 1e-5,longitudinal="yes")
+tt=gamlss_t1
+#p.value
+tmp2=as.data.frame(tt) %>% dplyr::select(contains("pval.adjust")) %>%  dplyr::select(ends_with(".1"))
+tmp1=as.data.frame(tt) %>%  dplyr::select(contains("pval.adjust")) %>%  dplyr::select(-colnames(tmp2))
+tmp1[is.na(tmp1)]=tmp2[!is.na(tmp2)]
+tt1 <- cbind(as.data.frame(tt) %>%  dplyr::select(1),tmp1)
+tt1$id <- gsub("k__bacteria.g__","",tt1$id)
+rownames(tt1)=tt1$id
+tt1=tt1[,-1] 
+colnames(tt1)=gsub("pval.adjust.","",colnames(tt1))
+#odds ratio
+df=as.data.frame(tt) %>% dplyr::select(contains("Estimate"))
+rownames(df)=tt$id <- gsub("k__bacteria.g__","",tt$id)
+colnames(df)=gsub("Estimate.","",colnames(df))
+
+tt2=tt1[rowSums(tt1<0.05)>0,]
+df1=df[rowSums(tt1<0.05)>0,]
+sig=rownames(df1)[order(df1$Death1,decreasing = T)]
+bk <- c(seq(-2,-0.1,by=0.01),seq(0,2,by=0.01)) 
+
+
+pheatmap(df1[sig,],
+         color = colorRampPalette(c("#4575B4", "white", "#b2182b"))(length(bk)),
+         angle_col = "45",border=F,
+         display_numbers = matrix(ifelse((tt2[sig,]<=0.05 & tt2[sig,]>0.01),"*", 
+                                         ifelse((tt2[sig,]<=0.01 & tt2[sig,]>0.001),"**",
+                                                ifelse(tt2[sig,]<=0.001,"***",""))), nrow(tt2)),
+         cluster_rows = F,
+         fontsize = 11,
+         cluster_cols = F,border_color = "grey60",breaks = bk
+)
+
+```
+
+## Figure S2A relative abundance heatmap
+```{r,echo=TRUE,tidy=TRUE}
+
+```
+
+
+## Figure 2B
+```{r,fig.show='hold',fig.width=7, fig.height=6,echo=TRUE,tidy=TRUE}
+env1 <- dplyr::select(map_D,Sample,Age,Gender,CORTICOSTEROID,Death,
+                      COMORBIDITY,Treatment,Severity_A,Copy,ANTB_CLS3_STATUS,
+                      Individual_ID)
+rownames(env1)=env1$Sample
+env1=env1[rownames(genus_D),]
+env1$CORTICOSTEROID=as.factor(env1$CORTICOSTEROID)
+env1$Severity_A=as.factor(env1$Severity_A)
+env1$Death=as.factor(env1$Death)
+env1$ANTB_CLS3_STATUS=as.factor(env1$ANTB_CLS3_STATUS)
+env1$COMORBIDITY=as.factor(env1$COMORBIDITY)
+all(rownames(genus_D) == env1$Sample)
+df1 <- cbind(env1,genus_D)
+df1$Death <- as.factor(df1$Death)
+gamlss_t2 <- taxa.compare(taxtab =df1,propmed.rel="gamlss",comvar="Death",personid = "Individual_ID",
+                          adjustvar =c("CORTICOSTEROID","Treatment",
+                                       "Gender","Age","Severity_A","COMORBIDITY","ANTB_CLS3_STATUS"),
+                          p.adjust.method="fdr" ,relabund.filter = 1e-5,
+                          longitudinal="yes")
+tt=gamlss_t2
+#p.value
+tmp2=as.data.frame(tt) %>% dplyr::select(contains("pval.adjust")) %>%  dplyr::select(ends_with(".1"))
+tmp1=as.data.frame(tt) %>%  dplyr::select(contains("pval.adjust")) %>%  dplyr::select(-colnames(tmp2))
+tmp1[is.na(tmp1)]=tmp2[!is.na(tmp2)]
+tt1 <- cbind(as.data.frame(tt) %>%  dplyr::select(1),tmp1)
+tt1$id <- gsub("k__bacteria.g__","",tt1$id)
+rownames(tt1)=tt1$id
+tt1=tt1[,-1] 
+colnames(tt1)=gsub("pval.adjust.","",colnames(tt1))
+#odds ratio
+df=as.data.frame(tt) %>% dplyr::select(contains("Estimate"))
+rownames(df)=tt$id <- gsub("k__bacteria.g__","",tt$id)
+colnames(df)=gsub("Estimate.","",colnames(df))
+
+tt2=tt1[rowSums(tt1<0.05)>0,]
+df1=df[rowSums(tt1<0.05)>0,]
+sig=rownames(df1)[order(df1$Death1,decreasing = T)]
+bk <- c(seq(-2,-0.1,by=0.01),seq(0,2,by=0.01)) 
+
+
+pheatmap(df1[sig,],
+         color = colorRampPalette(c("#4575B4", "white", "#b2182b"))(length(bk)),
+         angle_col = "45",border=F,
+         display_numbers = matrix(ifelse((tt2[sig,]<=0.05 & tt2[sig,]>0.01),"*", 
+                                         ifelse((tt2[sig,]<=0.01 & tt2[sig,]>0.001),"**",
+                                                ifelse(tt2[sig,]<=0.001,"***",""))), nrow(tt2)),
+         cluster_rows = F,
+         fontsize = 11,
+         cluster_cols = F,border_color = "grey60",breaks = bk
+)
+```
+
+
+## Figure S2B relative abundance heatmap
+```{r,echo=TRUE,tidy=TRUE}
+gam_genus_D=rownames(tt2)[tt2$Death1<0.05]
+gam_genus_D=gam_genus_D[order(df1[gam_genus_D,"Death1"],decreasing = T)]
+##Odds ratio
+row_df=data.frame(genus=gam_genus_D,OR=df1[gam_genus_D,"Death1"])  
+colnames(genus_D)=gsub("k__bacteria.g__","",colnames(genus_D))
+plot_df2=genus_D[gam_genus_D,]
+plot_df2=log10(plot_df2+1e-5)
+col_df=data.frame(samples=colnames(plot_df2),class=map_D[colnames(plot_df2),"Death"])
+col_df=col_df[order(col_df$class,decreasing = T),]
+plot_df2=plot_df2[,col_df$samples]
+
+rownames(col_df)=col_df$samples
+rownames(row_df)=row_df$genus
+bk <- c(seq(-5,-2.5,by=0.01),seq(-2.4,-0.1,by=0.01)) 
+pheatmap(plot_df2,
+         color = colorRampPalette(c("#4575B4", "white", "#b2182b"))(length(bk)),
+         show_colnames = F,border=F,
+         annotation_row = row_df[,2,drop=F],
+         annotation_col = col_df[,2,drop=F],
+         cluster_rows = F,
+         fontsize = 11,
+         cluster_cols = F,border_color = "grey60",breaks = bk,
+         gaps_col = 28,gaps_row = 10
+)
+
+
+
+```
+
+##Figure 3D
+```{r,echo=TRUE,tidy=TRUE}
+strep_list = c("Streptococcus parasanguinis","Streptococcus sp. oral taxon 431", "Streptococcus pneumoniae","Streptococcus salivarius","Streptococcus sanguinis","Streptococcus oralis","Streptococcus koreensis")
+df1 <- species %>% as.matrix()%>% prop.table(.,2) %>% .[strep_list[1:7],rownames(map_A)] %>% as.matrix() 
+map_A$dis2adm <-  as.numeric(as.Date(map_A$Admission)-as.Date(map_A$Dischrge)) %>% abs
+OS_m <- dplyr::select(map_A, Death, dis2adm) # dis2sym os_time dis2
+OS_m$os_time=OS_m$dis2adm
+OS_m$os_time[OS_m$os_time>30]=30
+OS_m$Death=as.numeric(OS_m$Death)
+mySurv <- with(OS_m, Surv(os_time, Death))
+log_rank_p <- apply(df1, 1, function(gene) {
+  # gene=exprSet[1,]
+  OS_m$group <- ifelse(gene > median(gene), "high", "low")
+  data.survdiff <- survdiff(mySurv ~ group, data = OS_m)
+  p.val <- 1 - pchisq(data.survdiff$chisq, length(data.survdiff$n) - 1)
+  return(p.val)
+})
+table(log_rank_p < 0.05)
+rf_list1 <- log_rank_p[log_rank_p < 0.05] %>% names()
+rf_list1
+df3 <- cbind(t(df1), OS_m)
+i="Streptococcus parasanguinis"
+  tmp <- dplyr::select(df3, Death, os_time, i)
+  tmp$group <- ifelse(tmp[, i] > median(tmp[, i]), "High", "Low")
+  mySurv_OS <- with(tmp, Surv(os_time, Death))
+  sfit <- survfit(mySurv_OS ~ group, data = tmp)
+ p=ggsurvplot(sfit, pval = TRUE, conf.int = TRUE, surv.median.line = "hv",risk.table = TRUE,risk.table.col = "strata", ggtheme = theme_bw(), palette = c("#E7B800", "#2E9FDF")) + ggtitle(i)
+p[[1]]/p[[2]]
+```
+
+## Fig 3A
+```{r,echo=TRUE,tidy=TRUE}
+Death_color=c("#4CAD49","#045A8D","#A50F15")
+genus %>% as.matrix()%>%  prop.table(.,2) %>% as.data.frame()%>%  .[1,filter(metadata,Death %in% c(0,1)) %>% rownames()]  %>%t() %>% 
+  as.data.frame() %>%
+  rownames_to_column("Sample_ID2") %>%
+  right_join(metadata, .) %>%
+  mutate(Survival = as.factor(Death)) %>%
+  mutate(Group = ifelse(Death == 1, "Deceased", "Survival")) %>%
+  ggboxplot(., "sam2adm_correct", "Streptococcus", fill = "Survival", palette = Death_color[c(2,3)]) +
+  scale_y_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  ) + stat_compare_means(aes(group = Survival), label = "p.signif") + ylab("Streptococcus relative abundance")+xlab("Days after admission")
+
+```
+
+
+## Figure S3A
+```{r,echo=TRUE,tidy=TRUE}
+df=genus[1,c(map_A_share$Sample_ID2,map_D_share$Sample_ID2)] %>% as.data.frame() %>% rownames_to_column("Sample_ID2") %>% right_join(metadata,.)
+colnames(df)[ncol(df)]="value"
+df$TT=ifelse(df$Sample_ID2 %in% map_A_share$Sample_ID2,"A","D")
+
+df$value[df$value < 1e-6] <- 1e-6
+ggpaired(df,
+  x = "TT", y = "value", facet.by = "Group",
+  line.color = "gray",line.size = 0.5,id = "Individual_ID", color = "TT", palette = "jama",
+) +
+  stat_compare_means(paired = TRUE)+  scale_y_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  )
+```
+
+## Fig 3C
+```{r,echo=TRUE,tidy=TRUE}
+ll=intersect(rownames(species),species_list$real_taxname)
+df=species[ll,] %>% as.matrix() %>% prop.table(.,2) %>% .[strep_list[1:7],c(map_A %>% rownames(), filter(metadata,Death %in% c("health"),reads_gthan3000=="yes") %>% rownames())] %>%as.data.frame() %>% 
+  rownames_to_column("tax") %>%
+  melt(variable.name = "Sample_ID2") %>%
+  mutate(rela = value + 1e-5) %>%
+  right_join(metadata, .)
+##Summary different streptococcus species fold change 
+df$Death[df$Death=="health"]="Healthy"
+df$Death[df$Death=="1"]="Deceased"
+df$Death[df$Death=="0"]="Recovered"
+df %>% group_by(tax,Group) %>% summarise(median=median(rela)) %>% dcast(tax~Group) %>% mutate(Healthy_Deceased= Healthy/Deceased,Healthy_Recovered= Healthy/Recovered,Recovered_Deceased= Recovered/Deceased)
+
+  df=mutate(df,Survival = as.factor(Death))
+  df$Survival=factor(df$Survival,levels=c("Healthy","Recovered","Deceased"))
+  ggboxplot(df, "tax", "rela", fill = "Survival", palette = Death_color[c(3,1,2)]) +
+  scale_y_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  ) + stat_compare_means(aes(group = Survival), label = "p.signif") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5))
+
+  my_comparisons=list(c("Healthy","Recovered"),c("Recovered","Deceased"),c("Healthy","Deceased"))
+ggboxplot(df,"Survival", "rela", fill = "Survival", palette = Death_color[c(3,1,2)],facet.by = "tax")+
+  stat_compare_means(comparisons =my_comparisons,label = "p.signif" )
+  
+
+```
+
+###Fig S3B
+```{r,echo=TRUE,tidy=TRUE}
+ll=intersect(rownames(species),species_list$real_taxname)
+df=species[ll,] %>% as.matrix() %>% prop.table(.,2) %>% .[strep_list[1:7],c(map_D %>% rownames(), filter(metadata,Death %in% c("health"),reads_gthan3000=="yes") %>% rownames())] %>%as.data.frame() %>% 
+  rownames_to_column("tax") %>%
+  melt(variable.name = "Sample_ID2") %>%
+  mutate(rela = value + 1e-5) %>%
+  right_join(metadata, .)
+df$Death[df$Death=="health"]="Healthy"
+df$Death[df$Death=="1"]="Deceased"
+df$Death[df$Death=="0"]="Recovered"
+df=mutate(df,Survival = as.factor(Death))
+df$Survival=factor(df$Survival,levels=c("Healthy","Recovered","Deceased"))
+ggboxplot(df, "tax", "rela", fill = "Survival", palette = Death_color[c(3,1,2)]) +
+  scale_y_log10(
+    breaks = trans_breaks("log10", function(x) 10^x),
+    labels = trans_format("log10", math_format(10^.x))
+  ) + stat_compare_means(aes(group = Survival), label = "p.signif") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0.5, vjust = 0.5))
+
+my_comparisons=list(c("Healthy","Recovered"),c("Recovered","Deceased"),c("Healthy","Deceased"))
+ggboxplot(df,"Survival", "rela", fill = "Survival", palette = Death_color[c(3,1,2)],facet.by = "tax")+
+  stat_compare_means(comparisons =my_comparisons,label = "p.signif" )
+
+```
+
+## Figure S4D
+```{r,echo=TRUE,tidy=TRUE}
+# alliviual
+library(ggalluvial)
+dd1 <-  species %>%  as.matrix() %>% prop.table(.,2) %>% .[, filter(metadata, Death%in% c(0,"health"),reads_gthan3000=="yes") %>% rownames()] %>% as.matrix() 
+dd2 <- dd1[order(rowSums(dd1), decreasing = T), ]
+dd3 <- dd2 %>%
+  as.data.frame() %>%
+  rownames_to_column("taxname")
+dd3$taxname[16:nrow(dd3)] <- "Others"
+dd4 <- dd3 %>%
+  group_by(taxname) %>%
+  summarise_each(funs = sum) %>%
+  as.data.frame()
+dd4$taxname <- factor(dd4$taxname, levels = rev(dd3$taxname[1:16]))
+dd4 <- dd4 %>% melt()
+colnames(dd4)[2] <- "Sample_ID2"
+dd5 <- right_join(metadata, dd4)
+dd5$sam2adm_correct[is.na(dd5$sam2adm_correct)] <- "Healthy"
+#dd5$group <- ifelse(grepl("KLZ", dd5$Sample_ID), "T1", "Healthy")
+dd6 <- dd5 %>%
+  group_by(taxname, sam2adm_correct) %>%
+  summarise(rela = mean(value)) # %>% filter(sam2adm_correct!= 21)
+dd6$sam2adm_correct <- as.factor(dd6$sam2adm_correct)
+dd6$sam2adm_correct <- factor(dd6$sam2adm_correct, levels = c("1", "5", "10", "14", "21", "Healthy"))
+ggplot(dd6 %>% filter(sam2adm_correct != 21), aes(sam2adm_correct, rela, alluvium = taxname, stratum = taxname, fill = taxname)) +
+  geom_alluvium(aes(fill = taxname, colour = taxname)) +
+  geom_stratum() +
+  scale_fill_manual(values = inlmisc::GetColors(16, scheme = "discrete rainbow") %>% as.character()) +
+  theme_bw()
+```
+
+
+## Figure S4E 
+```{r,echo=TRUE,tidy=TRUE}
+df1 <- species[, map_A_share$Sample_ID2]
+df2 <- species[, map_D_share$Sample_ID2]
+df21 <- df2 %>%
+  as.data.frame() %>%
+  rownames_to_column("tax") %>%
+  melt(variable.name = "Sample_ID2") %>%
+  mutate(group1 = "T2") %>%
+  right_join(metadata, .)
+df11 <- df1 %>%
+  as.data.frame() %>%
+  rownames_to_column("tax") %>%
+  melt(variable.name = "Sample_ID2") %>%
+  mutate(group1 = "T1") %>%
+  right_join(metadata, .)
+df3 <- rbind(df11, df21) %>% filter(Death != 1) # %>% filter(Individual_ID %in% map_tm_share$Individual_ID)
+dd <- dplyr::select(df3 %>% filter(Severity.D. == 2), tax, group1, value)
+ll=intersect(metadata1$Sample_ID2,colnames(wh_ncov_genus_p))
+dd1 <- melt(species[,ll] %>% as.data.frame() %>% rownames_to_column("tax")) %>%
+  mutate(group1 = "Healthy") %>%
+  dplyr::select(1, 4, 3) %>%
+  rbind(dd, .)
+ll=species[rowMeans(species[,unique(df3$Sample_ID2)])>0.01,] %>% rownames()
+ll1=df3 %>% group_by(group1,tax) %>% dplyr::summarise(aa=median(value)) %>% dcast(tax~group1) %>% filter(T2>T1) %>% .[,1] %>% intersect(.,ll)
+
+compare_means(value ~ group, data = df3 %>% filter(Death == "Recovered") %>% filter(Severity.D. == 2), paired = T, group.by = "tax", id = "Individual_ID") %>%
+  as.data.frame() %>%
+  filter(p.signif != "ns") %>% filter(tax %in% intersect(ll,ll1))
+
+A_D_up=compare_means(value ~ group1, data = df3 %>% filter(Death == 0) %>% filter(Severity.D. == 2), paired = T, group.by = "tax", id = "Individual_ID", p.adjust.method = "fdr") %>%
+  as.data.frame() %>%
+  filter(p.signif != "ns") %>% filter(tax %in% ll1)
+
+
+df1 <- species[A_D_up$tax,map_A_share$Sample_ID2]
+df3 <- species[A_D_up$tax,map_D_share$Sample_ID2]
+df11 <- df1 %>%
+  as.data.frame() %>%
+  rownames_to_column("tax") %>%
+  melt(variable.name = "Sample_ID2") %>%
+  mutate(group1 = "T1") %>%
+  right_join(metadata, .)
+df31 <- df3 %>%
+  as.data.frame() %>%
+  rownames_to_column("tax") %>%
+  melt(variable.name = "Sample_ID2") %>%
+  mutate(group1 = "T2") %>%
+  right_join(metadata, .)
+df <- rbind(df11, df31)
+df$value[df$value < 1e-5] <- 1e-5
+df$value <- log10(df$value)
+kk1 <- df %>%
+  filter(Death != 1) %>%
+  filter(Severity.D. == 2) %>%
+  dplyr::select(group1, tax, Individual_ID, value) %>%
+  dcast(Individual_ID + tax ~ group1) %>%
+  filter(T2 > T1)
+kk2 <- df %>%
+  filter(Death != 1) %>%
+  filter(Severity.D. == 2) %>%
+  dplyr::select(group1, tax, Individual_ID, value) %>%
+  dcast(Individual_ID + tax ~ group1) %>%
+  filter(T2 < T1)
+
+df1 <- df %>%
+  filter(Death != 1) %>%
+  filter(Severity.D. == 2) %>%
+  dplyr::select(group1, value, tax)
+dd <- species[A_D_up$tax,intersect(metadata1$Sample_ID2,colnames(wh_ncov_genus_p))] %>%as.data.frame() %>% 
+  rownames_to_column("tax") %>%
+  melt() %>%
+  mutate(group1 = "Healthy") %>%
+  dplyr::select(4, 3, 1)
+dd$value <- log10(dd$value)
+df2 <- rbind(df1, dd)
+df2$group <- factor(df2$group, levels = c("T1", "T2", "Healthy"))
+ggplot(df2 %>% filter(tax!="Lautropia mirabilis"), aes(group, value, color = group)) +
+  geom_boxplot(size = 1.5) +
+  facet_wrap(. ~ tax) +
+  theme_bw() +
+  geom_segment(data = kk2%>% filter(tax!="Lautropia mirabilis"), aes(x = "T1", y = T1, xend = "T2", yend = T2), color = "grey45", alpha = 0.25, linetype = 3, size = 0.3) +
+  geom_segment(data = kk1%>% filter(tax!="Lautropia mirabilis"), aes(x = "T1", y = T1, xend = "T2", yend = T2), color = "grey45", alpha = 0.3, size = 0.3) +
+  scale_color_jama() +
+  stat_compare_means(comparisons = mm,label = "p.signif")+theme(text=element_text(family="Arial"))
+
+```
+
+
+```{r,echo=TRUE,tidy=TRUE}
+
+```
+
+```{r,echo=TRUE,tidy=TRUE}
+###MLR
+genus_D_tmp=asin(sqrt(genus_D))
+all(rownames(genus_D_tmp)==map_D$Sample_ID)
+lm_t2=cbind(genus_D_tmp,dplyr::select(map_D,Death,Age,Gender,Treatment,Severity_A,CORTICOSTEROID,ANTB_CLS3_STATUS,COMORBIDITY))
+names(lm_t2)=gsub("k__bacteria.g__","",names(lm_t2))
+lm_t2_res=data.frame(beta=0,p=0)
+for(i in 1:ncol(genus_D_tmp)){
+  fm=as.formula(paste("lm_t2[,i]~",paste(names(lm_t2)[63:ncol(lm_t2)],collapse = "+"),sep = ""))
+  tmp=lm(fm,data = lm_t2) %>% summary()
+  lm_t2_res[i,]=c(tmp$coefficients[2,1],tmp$coefficients[2,4])
+}
+rownames(lm_t2_res)=names(lm_t2)[1:62]
+lm_t2_res$p.adj=p.adjust(lm_t2_res$p,method = "fdr",n = nrow(lm_t2_res))
+#after multiple test correction
+rownames(lm_t2_res)[lm_t2_res$p.adj<0.05 & lm_t2_res$beta<0]
+rownames(lm_t2_res)[lm_t2_res$p.adj<0.05 & lm_t2_res$beta>0]
+#before multiple test correction
+rownames(lm_t2_res)[lm_t2_res$p<0.05 & lm_t2_res$beta<0]
+rownames(lm_t2_res)[lm_t2_res$p<0.05 & lm_t2_res$beta>0]
+
+```
+
+
+
+## Survival analysis
+```{r,echo=TRUE,tidy=TRUE}
+map_A$OS=(as.Date(map_A$Dischrge)-as.Date(map_A$Admission)) %>% as.numeric()
+map_A$age_bin[map_A$Age>median(map_A$Age)]=1
+map_A$age_bin[map_A$Age<=median(map_A$Age)]=0
+
+##overall survival time
+map_A$OS=(as.Date(map_A$Dischrge)-as.Date(map_A$Admission)) %>% as.numeric()
+map_A$age_bin[map_A$Age>median(map_A$Age)]=1
+map_A$age_bin[map_A$Age<=median(map_A$Age)]=0
+#Survival analysis focus on differential genus identified by gamlss analysis in time point A
+gam_genus_A=rownames(tt2)[tt2$Death1<0.05]
+colnames(genus_A)=gsub("k__bacteria.g__","",colnames(genus_A))
+df1=genus_A[,gam_genus_A] %>% t()
+all(rownames(df1)==map_A$Sample_ID)
+df1[df1<1e-5]=1e-5
+df1=log10(df1)
+OS_m <-dplyr::select(map_A,Sample,Death,OS,Age,Gender,Treatment,age_bin,
+                     Severity_A,CORTICOSTEROID,COMORBIDITY,ANTB_CLS3_STATUS)
+OS_m$ANTB_CLS3_STATUS[OS_m$ANTB_CLS3_STATUS=="TRUE"]=1
+OS_m$ANTB_CLS3_STATUS[OS_m$ANTB_CLS3_STATUS=="FALSE"]=0
+OS_m$Gender[OS_m$Gender=="M"]=1
+OS_m$Gender[OS_m$Gender=="F"]=0
+OS_m$Treatment[OS_m$Treatment=="R"]=1
+OS_m$Treatment[OS_m$Treatment=="C"]=0
+all(rownames(df1)==OS_m$Sample_ID)
+df3=cbind(df1 %>% t,dplyr::select(OS_m,-Sample)) 
+
+df1=dplyr::select(df3,-Death,-OS)
+df1$Severity_A=as.factor(df1$Severity_A)
+df3$Death=as.numeric(df3$Death)
+```
+
+
+```{r,echo=TRUE,tidy=TRUE}
+####################univariate cox regression###############
+cox_results=data.frame()
+for(i in 1:ncol(df1)){
+  survival_dat <- data.frame(group=df1[,i],OS=df3$OS,Death=df3$Death)
+  m=coxph(Surv(OS,Death) ~ group, data =  survival_dat)
+  beta <- coef(m)
+  se <- sqrt(diag(vcov(m)))
+  HR <- exp(beta)
+  HRse <- HR * se
+  tmp <- round(cbind(coef = beta, se = se, z = beta/se, p = 1 - pchisq((beta/se)^2, 1),
+                     HR = HR, HRse = HRse,
+                     HRz = (HR - 1) / HRse, HRp = 1 - pchisq(((HR - 1)/HRse)^2, 1),
+                     HRCILL = exp(beta - qnorm(.975, 0, 1) * se),
+                     HRCIUL = exp(beta + qnorm(.975, 0, 1) * se)), 3)
+  cox_results=rbind(cox_results,tmp[1,]) 
+  
+}
+names(cox_results)=colnames(tmp)
+rownames(cox_results)=colnames(df1)
+cox_results=cox_results[rownames(cox_results)!="age_bin",]
+cox_results$p.adj=p.adjust(cox_results$p,method="fdr",n=nrow(cox_results))
+table(cox_results$p.adj<0.05)
+tmp=rownames(cox_results[cox_results$p<0.05,])
+
+##############################KM analysis####################
+df4=dplyr::select(df1,-Age)
+for (i in 1:length(gam_genus_A)) {
+  df4[,i]=ifelse(df4[,i]<=mean(df4[,i]),0,1)
+}
+df4=cbind(df4,dplyr::select(df3,OS,Death))
+km_res=data.frame(variable=0,pval=0)
+for (i in names(df4)[1:26]) {
+  kmfit<-survfit(as.formula(paste("Surv(OS, Death)~",i,sep="")), data =  df4)
+  km_res[i,]=surv_pvalue(kmfit)[1:2]
+}
+tmp1=km_res$variable[km_res$pval<0.05]
+
+k=intersect(tmp,tmp1)
+########################Lasso regression to select model marker######
+y <- df3[,c("Death","OS")] %>% na.omit()
+x <- df1[,k] %>% data.matrix()
+x=x[rownames(y),]
+y$OS=as.double(y$OS)
+y$Death <- as.double(y$Death)
+y=as.matrix(Surv(y$OS,y$Death))
+lasso_fit <- cv.glmnet(x,y,family='cox',type.measure = 'C')
+coefficient <- coef(lasso_fit, s=lasso_fit$lambda.min)
+Active.Index <- which(as.numeric(coefficient) != 0)
+active.coefficients <-as.numeric(coefficient)[Active.Index]
+sig_gene_multi_cox <- rownames(coefficient)[Active.Index]
+sig_gene_multi_cox
+
+#####################################multivariate regression#################
+
+formula_for_multivariate <-  as.formula(paste0('Surv(OS,Death)~', 
+                                               paste(k,collapse = '+')))
+df3$ANTB_CLS3_STATUS=as.factor(df3$ANTB_CLS3_STATUS)
+model <- survival::coxph(formula_for_multivariate,data = df3 )
+model %>% summary()
+ggforest(model,main = "Hazard ratio",cpositions = c(0.02,0.22, 0.4),fontsize = 1,refLabel = "reference",noDigits = 2)
+
+
+
+```
+
+
+```{r,echo=TRUE,tidy=TRUE}
+##############################K-M anakysis for selected genera############################
+formula_for_multivariate <-  as.formula(paste('Surv(OS,Death)~', 
+                                              paste(k[1:2], sep = '', collapse = '+')))
+
+multi_variate_cox_2 <-  coxph(formula_for_multivariate,data = df3)
+ggforest(multi_variate_cox_2,main = "Hazard ratio",cpositions = c(0.02,0.22, 0.4),fontsize = 1,refLabel = "reference",noDigits = 2)
+
+####Calculation risk score
+riskscore <- function(survival_cancer_df,candidate_genes_for_cox,cox_report){
+  risk_score_table <- survival_cancer_df[,candidate_genes_for_cox]
+  for(each_sig_gene in colnames(risk_score_table)){
+    risk_score_table$each_sig_gene <- risk_score_table[,each_sig_gene]*(summary(cox_report)$coefficients[each_sig_gene,1])
+    risk_score_table <- cbind(risk_score_table, 'total_risk_score'=exp(rowSums(risk_score_table))) %>% 
+      cbind(survival_cancer_df[,c('Death','OS')])
+    risk_score_table <- risk_score_table[,c('Death','OS',candidate_genes_for_cox,'total_risk_score')]
+    return(risk_score_table)
+  }
+}
+
+risk_score_table_multi_cox2 <- riskscore(df3,k[1:2],multi_variate_cox_2)
+
+####################slect cut off to plot K-M curve##############
+multi_ROC <- function(time_vector, risk_score_table){
+  single_ROC <- function(single_time){
+    for_ROC <- survivalROC(Stime = risk_score_table$OS,
+                           status = risk_score_table$Death,
+                           marker = risk_score_table$total_risk_score,
+                           predict.time = single_time, method = 'KM')
+    tmp=data.frame('True_positive'=for_ROC$TP, 'False_positive'=for_ROC$FP,
+                   'Cut_values'=for_ROC$cut.values, 'Time_point'=rep(single_time, length(for_ROC$TP)),
+                   'AUC'=rep(for_ROC$AUC, length(for_ROC$TP)))
+  }
+  multi_ROC_list <- lapply(time_vector, single_ROC)
+  do.call(rbind, multi_ROC_list)
+}
+formultiROC <- multi_ROC(time_vector = seq(5,43,by = 2), risk_score_table = risk_score_table_multi_cox2)
+
+AUC_max_time=formultiROC$Time_point[order(formultiROC$AUC,decreasing = T)[1]]
+# ggplot(formultiROC,aes(x=False_positive,y=True_positive,label=Cut_values,color=Time_point))+
+#   geom_roc(labels = F,stat = "identity",n.cuts = 0)+
+#   geom_abline(slope = 1,intercept = 0,color="red",linetype=2)+
+#   theme_bw()+
+#   annotate("text",x=0.75,y=0.15,
+#            label=paste("AUC max = ",max(formultiROC$AUC) %>% round(.,2),
+#                        '\n',"AUC max time = ",AUC_max_time, ' days', sep = '')
+#   )
+
+
+```
+
+## Figure 2C
+```{r,fig.show='hold',fig.width=7, fig.height=6,echo=TRUE,tidy=TRUE}
+formultiROC$Time_point <- as.factor(formultiROC$Time_point)
+optimal_time_ROC_df <- formultiROC[which(formultiROC$Time_point == AUC_max_time),]
+cut.off <- optimal_time_ROC_df$Cut_values[which.max(optimal_time_ROC_df$True_positive-optimal_time_ROC_df$False_positive)]
+Group <- (risk_score_table_multi_cox2$total_risk_score > cut.off)
+Group[Group == TRUE] <- 'high'
+Group[Group == FALSE] <- 'low'
+risk_score_table_multi_cox2$Score <- Group
+risk_score_table_multi_cox2$OS[risk_score_table_multi_cox2$OS>30]=30
+
+#KM plot
+fit_km <- survfit(Surv(OS,Death)~Score, data = risk_score_table_multi_cox2)  
+ggsurvplot(fit_km,pval =TRUE,conf.int=T,surv.median.line="hv",
+           ggtheme=theme_bw(),palette=c("#E7B800","#2E9FDF"),
+           censor=F,risk.table = TRUE,risk.table.col = "strata")
+
+```
+
+## Fig 3B
+```{r,echo=TRUE,tidy=TRUE}
+#T1
+all(map_A$Sample==names(genus_A))
+genus_A=genus_A %>% t()
+plotdata1=data.frame(Streptococcus=genus_A["Streptococcus",] %>% as.numeric(),
+                     Death=map_A$Death)
+
+plotdata1=plotdata1[order(plotdata1$Streptococcus),]
+plotdata1$Death=as.numeric(plotdata1$Death)
+rate=vector()
+for (i in 1:nrow(plotdata1)) {
+  rate[i]=sum(plotdata1$Death[1:i])/i
+}
+plotdata1$Death_rate=rate
+ggplot(plotdata1,aes(x=Streptococcus,y=Death_rate))+geom_point()+geom_smooth()
+
+##T2
+all(names(genus_D)==map_D$Sample)
+genus_D=genus_D %>% t()
+plotdata2=data.frame(Streptococcus=genus_D["Streptococcus",] %>% as.numeric(),
+                     Death=map_D$Death)
+
+plotdata2=plotdata2[order(plotdata2$Streptococcus),]
+plotdata2$Death=as.numeric(plotdata2$Death)
+rate=vector()
+for (i in 1:nrow(plotdata2)) {
+  rate[i]=sum(plotdata2$Death[1:i])/i
+}
+
+k=seq(0,1,0.01)
+k=k[-1]
+
+dd1=data.frame(x=k)
+rate=vector()
+for (i in 1:100) {
+  rate[i]=sum(plotdata1$Death[plotdata1$Streptococcus<k[i]])/length(plotdata1$Death[plotdata1$Streptococcus<k[i]])
+}
+dd1$rate=rate
+
+dd2=data.frame(x=k)
+rate=vector()
+for (i in 1:100) {
+  rate[i]=sum(plotdata2$Death[plotdata2$Streptococcus<k[i]])/length(plotdata2$Death[plotdata2$Streptococcus<k[i]])
+}
+dd2$rate=rate
+dd=rbind(dd1,dd2)
+dd$Group=c(rep("T1",nrow(dd1)),rep("T2",nrow(dd2)))
+ggplot(dd2,aes(x=x,y=rate))+geom_point()+geom_smooth()
+p=ggplot(dd,aes(x=x,y=rate,group=Group))+
+  scale_color_manual(values = c("#0571b0","#a50f15"))+
+  geom_point(aes(color=Group,shape=Group),alpha=0.2)+geom_smooth(se = F,aes(color=Group))+
+  theme_classic()+ylab("Accumulative Death Rate")+xlab("Streptococcus Realtive Abundance")
+p=p + theme(legend.title=element_blank())
+p
+```
+
+##Fig 5C
+```{r,echo=TRUE,tidy=TRUE}
+map_A_D=merge(dplyr::select(map_A,Individual_ID,Sample,Death,Age,Gender,Treatment,Severity_A,CORTICOSTEROID,COMORBIDITY,ANTB_CLS3_STATUS,Copy),
+                dplyr::select(map_D,Individual_ID,Sample,Death,Age,Gender,Treatment,Severity_A,CORTICOSTEROID,COMORBIDITY,ANTB_CLS3_STATUS,Copy),
+                by="Individual_ID",suffixes=c(".t1",".t2"))
+map_A_D=map_A_D[map_A_D$Sample.t1!=map_A_D$Sample.t2,]
+
+change=matrix(0,nrow(map_A_D),nrow(genus_A)) %>% as.data.frame()
+
+genus_A <- t(genus_A)
+genus_D <- t(genus_D)
+names(change)=rownames(genus_A)
+all(rownames(genus_A)==rownames(genus_D))
+for (i in 1:nrow(map_A_D)) {
+  for (j in 1:nrow(genus_A)) {
+    change[i,j]=genus_D[rownames(genus_D)[j],map_A_D$Sample.t2[i]]-genus_A[rownames(genus_A)[j],map_A_D$Sample.t1[i]]
+  }
+}
+
+change=cbind(map_A_D,change)
+change_death=change[change$Death.t1==1,]
+change_alive=change[change$Death.t1==0,]
+
+key_death=vector()
+j=1
+for (i in 1:nrow(genus_A)) {
+  if(sort(change_death[,21+i],decreasing = T)[1] >= 0.1 & sort(change_death[,21+i],decreasing = T)[2] >= 0.1){
+    key_death[j]=names(change_death)[21+i]
+    j=j+1
+  }
+}
+key_alive=vector()
+j=1
+for (i in 1:nrow(genus_A)) {
+  if(sort(change_alive[,21+i],decreasing = T)[1] >= 0.1 & sort(change_alive[,21+i],decreasing = T)[2] >= 0.1){
+    key_alive[j]=names(change_alive)[21+i]
+    j=j+1
+  }
+}
+key=union(key_alive,key_death)
+
+data_death=matrix(0,length(key),3) %>% as.data.frame()
+names(data_death)=c("genus","Frequency","Group")
+data_death$genus=key %>% as.character()
+data_death$Group="Death"
+data_death$Frequency=apply(change_death[,key],2,function(x){length(which(x>=0.1))/nrow(change_death)})
+
+data_alive=matrix(0,length(key),3) %>% as.data.frame()
+names(data_alive)=c("genus","Frequency","Group")
+data_alive$genus=key %>% as.character()
+data_alive$Group="Alive"
+data_alive$Frequency=apply(change_alive[,key],2,function(x){length(which(x>=0.1))/nrow(change_alive)})
+
+plotdata1=rbind(data_alive,data_death)
+plotdata1$Group=factor(plotdata1$Group,levels = c("Death","Alive"),
+                       labels = c("Decease","Recovered"))
+plotdata1$genus=factor(plotdata1$genus,
+                       levels = plotdata1$genus[order(plotdata1$Frequency[plotdata1$Group=="Recovered"])])
+p1=ggplot(plotdata1,aes(x=genus,y=Frequency,group=Group,fill=Group))+
+  geom_bar(position="dodge",width =0.8,stat='identity')+
+  labs(y="Frequency")+
+  coord_flip()+
+  theme_bw()+
+  scale_y_continuous(limits = c(0,0.5),
+                     breaks = seq(0,0.5,0.1))+
+  scale_fill_manual(values = c("#a50f15","#045a8d"))+
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.grid.major=element_blank(),panel.grid.minor=element_blank(),
+        axis.title.x =element_text(size = 20,color="black"),
+        axis.title.y =element_blank(),
+        title=element_text(size=25,face="bold"),
+        legend.title = element_blank(),
+        axis.text.x= element_text(size = 20,color="black"),
+        axis.text.y= element_text(size = 20,color="black"),
+        legend.text = element_text(size = 20,color="black"),legend.position = "right")
+p1
+
+
+#fisher exact test
+data_test=matrix(0,length(key),5) %>% as.data.frame()
+names(data_test)=c("genus","alive1","alive2","death1","death2")
+data_test$genus=key %>% as.character()
+data_test$alive1=apply(change_alive[,key],2,function(x){length(which(x>=0.1))})
+data_test$alive2=apply(change_alive[,key],2,function(x){nrow(change_alive)-length(which(x>=0.1))})
+data_test$death1=apply(change_death[,key],2,function(x){length(which(x>=0.1))})
+data_test$death2=apply(change_death[,key],2,function(x){nrow(change_death)-length(which(x>=0.1))})
+data_test$p=0
+for(i in 1:length(key)){
+  temp= matrix(data_test[i,2:5] %>% as.numeric(),2,2) %>% t()
+  tt=fisher.test(temp)
+  data_test$p[i]=tt$p.value
+}
+data_test$p.adj=p.adjust(data_test$p,method = "fdr",n=length(data_test$p))
+data_test$p.adj=round(data_test$p.adj,digits = 2)
+data_test$genus[data_test$p.adj<=0.05]
+```
+
+## Fig 6C/D
+```{r,echo=TRUE,tidy=TRUE}
+
+
+species_A=t(species[species_list$real_taxname,metadata %>% filter(Death %in% c(1,0),reads_gthan3000=="yes") %>% .[,"Sample"]] %>% na.omit()%>% as.matrix() %>% prop.table(.,2) %>% .[,map_A$Sample] %>% .[rowSums(.>0.01)>0,])
+#
+species_D=t(species[species_list$real_taxname,metadata %>% filter(Death %in% c(1,0),reads_gthan3000=="yes") %>% .[,"Sample"]] %>% na.omit()%>%  as.matrix() %>% prop.table(.,2)  %>% .[,map_D$Sample] %>% .[rowSums(.>0.01)>0,])
+
+vars=c('WBC','NEU' ,'LYM','ESR','PCT',
+       'IL.1b', 'IL.1ra','IL.2', 'IL.4','IL.5', 'IL.6', 'IL.7', 'IL.8', 'IL.9', 'IL.10', 'IL.12', 'IL.13',
+       'IL.15', 'IL.17', 'Eotaxin', 'IP.10', 'MCP.1.MCAF.', 'MIP.1a', 'MIP.1b',
+       'RANTES', 'FGF.basic', 'PDGF.bb', 'VEGF', 'G.CSF', 'GM.CSF', 'IFN.g',
+       'TNF.a')
+env = map_A[,vars]
+
+
+species_A=species_A[rownames(env),]
+all(rownames(species_A)==rownames(env))
+
+c1 <- complete.cases(species_A)
+c2 <- complete.cases(env) 
+c12 <- c1 & c2
+
+df1_sub <- species_A[c12,]
+df2_sub <- env[c12,]
+all(rownames(df1_sub)==rownames(df2_sub))
+###PCA
+tbpca = rda(df1_sub)
+oo=summary(tbpca)
+
+########extract variance explanations
+oo$cont[[1]][2,1]
+oo$cont[[1]][2,2]
+
+ef <- envfit(tbpca~., data = df2_sub,choices=c(1,2),perm = 2000)
+
+p=ef$vectors$pvals
+r=ef$vectors$r
+
+ef.score = as.data.frame(scores(ef, display = "vectors")) ## get the loading of each metadata
+pvals <- as.data.frame(ef$vectors$pvals)
+ef.score = cbind(ef.score,pvals)
+ef.score$label = rownames(ef.score)
+ef.score.sig<-subset(ef.score,pvals<0.05)
+
+################## 3.plot ################
+
+pcascores = vegan::scores(tbpca)
+pcascores = summary(tbpca)
+plotdata <- data.frame(rownames(pcascores$sites), 
+                       pcascores$sites[,1], pcascores$sites[,2])
+colnames(plotdata) <- c("Sample","RDA1","RDA2")
+plotdata=merge(plotdata,dplyr::select(map_A,Sample,Death))
+plotdata[plotdata$Death == 1,]$Death = 'Deceased'
+plotdata[plotdata$Death == 0,]$Death = 'Recovered'
+plotdata$group="sample"
+
+plotdata1=data.frame(Sample=rownames(pcascores$species),
+                     RDA1=pcascores$species[,1], RDA2=pcascores$species[,2])## get the loading of each species
+
+tmp1=colnames(species_A)[apply(species_A,2,max)>0.01]
+tmp2=colnames(species_D)[apply(species_D,2,max)>0.01]
+
+plotdata1$Death="species"
+plotdata1$group="species"
+plotdata1=plotdata1[tmp1,]
+
+plotdata=rbind(plotdata,plotdata1)
+plotdata$Death=factor(plotdata$Death,levels = c("Recovered","Deceased","species"))
+
+plotdata$group=factor(plotdata$group,levels = c("sample","species"))
+ 
+col <- c('#045a8d','#a50f15','grey30')
+
+plot_RDA <- ggplot(plotdata, aes(x=RDA1, y=RDA2)) +
+  geom_point(aes(color = Death,shape=group),size = 1,alpha=0.5) + 
+  scale_color_manual(values = col)+
+  xlab(paste("RDA1", sep = "")) + 
+  ylab(paste("RDA2", sep = "")) +
+  geom_segment(data = ef.score.sig,
+               aes(x = 0, xend = PC1, y = 0, yend = PC2),
+               color = "grey30", size = 0.3,
+               arrow = arrow(angle = 10, length = unit(0.2, "cm"))) +
+  geom_label_repel(data = ef.score.sig,segment.colour = "black",segment.size=0.5,size=2,
+                   aes(x = PC1, y = PC2, label = label)) +
+  geom_vline(aes(xintercept = 0), linetype = "dotted") +
+  geom_hline(aes(yintercept = 0), linetype = "dotted") +
+  theme(panel.background = element_rect(fill = "white", colour = "black"), 
+        panel.grid = element_blank(),
+        axis.title = element_text(color = "black", size = 10),
+        axis.line = element_line(colour = "black"),
+        axis.title.x = element_text(colour = "black", size = 10),
+        axis.title.y = element_text(colour="black", size = 10),
+        axis.text = element_text(colour = "black", size = 10),
+        legend.title = element_text(size=0,colour='black'),
+        legend.text = element_text(size = 10), legend.key = element_blank(),
+        plot.title = element_text(size = 10, colour = "black", 
+                                  face = "bold", hjust = 0.5))
+
+plot_RDA
+```
+
+## Fig 6E/F
+```{r,echo=TRUE,tidy=TRUE}
+
+save_pheatmap_pdf <- function(x, filename, width=12, height=12) {
+  stopifnot(!missing(x))
+  stopifnot(!missing(filename))
+  pdf(filename, width=width, height=height)
+  grid::grid.newpage()
+  grid::grid.draw(x$gtable)
+  dev.off()
+}
+
+tmp1=colnames(species_A)[apply(species_A,2,function(x){sum(x!=0)})>(nrow(species_A)/2)]
+tmp2=colnames(species_D)[apply(species_D,2,function(x){sum(x!=0)})>(nrow(species_D)/2)]
+
+species_A=species_A[,tmp1] %>% t()
+species_D=species_D[,tmp2] %>% t()
+
+df_tmp=map_A[,vars]
+df_tmp=apply(df_tmp,2,scale)
+
+
+pval.df=data.frame(matrix(0,length(vars),nrow(species_A)))
+r.df=data.frame(matrix(0,length(vars),nrow(species_A)))
+names(pval.df)=rownames(species_A)
+names(r.df)=rownames(species_A)
+rownames(pval.df)=vars
+rownames(r.df)=vars
+
+####correlation
+for(i in vars){
+  for (j in rownames(species_A)){
+    tmp=cor.test(df_tmp[,i] %>% as.numeric(),
+                 species_A[j,] %>% as.numeric())
+    pval.df[i,j]=tmp$p.value
+    r.df[i,j]=tmp$estimate
+  }
+}
+
+p.adjust.foo= function(x) p.adjust(x,method = "fdr")
+pval.df = apply(pval.df,1,p.adjust.foo) %>% t()
+
+nrow(pval.df)
+sig.thres = 0.01
+
+pval.df.sig = pval.df[rowSums(pval.df<sig.thres)>0,colSums(pval.df<sig.thres)>0]
+r.df.sig =r.df[na.omit(rownames(pval.df.sig)),na.omit(colnames(pval.df.sig))]
+pval.df.sig =pval.df.sig[na.omit(rownames(r.df.sig)),na.omit(colnames(r.df.sig))]
+
+pre_species=0
+for (i in 1:ncol(pval.df.sig)) {
+  tmp=which(pval.df.sig[,i]<0.01)
+  if(max(abs(r.df.sig[tmp,i]))>0.3){
+    pre_species[i]=colnames(pval.df.sig)[i]
+  }
+}
+pre_species=na.omit(pre_species)
+pre_species=pre_species[pre_species !=0]
+
+pval.df.sig=pval.df.sig[,pre_species]
+r.df.sig=r.df.sig[,pre_species]
+
+colnames(r.df.sig)
+if("WBC" %in% rownames(r.df.sig)){
+  sig=colnames(r.df.sig)[order(r.df.sig["WBC",],decreasing = T)]
+}else{sig=colnames(r.df.sig)}
+
+
+bk <- c(seq(-1,-0.1,by=0.01),seq(0,1,by=0.01)) 
+r.df.sig=t(r.df.sig)
+pval.df.sig=t(pval.df.sig)
+pheatmap(r.df.sig[sig,],
+                color = colorRampPalette(c("#13457E", "white", "#A71E31"))(length(bk)),
+                angle_col = "45",border=F,
+                display_numbers = matrix(ifelse((pval.df.sig[sig,]<=sig.thres & pval.df.sig[sig,]>0.01),"", 
+                                                ifelse((pval.df.sig[sig,]<=0.01 & pval.df.sig[sig,]>0.001),"**",
+                                                       ifelse(pval.df.sig[sig,]<=0.001,"***",""))), nrow(pval.df.sig)),
+                cluster_rows = F,
+                cluster_columns = F,
+                fontsize = 10,
+                cellwidth = 15, cellheight =10,
+                cluster_cols = F,breaks = bk,border_color = "grey60",
+                na_col = "grey90"
+)
+
+
+```
+
+## Fig S1G
+```{r,echo=TRUE,tidy=TRUE}
+tmp1=metadata$Sample[metadata$Death==0]
+tmp2=metadata$Sample[metadata$Death=="healthy"]
+
+rownames(metadata)=metadata$Sample
+head(metadata)
+for (i in seq(10,length(which(metadata$Death=="1")),10)) {
+  d=data.frame(R2=0,F=0,p=0)
+  k=1
+  while (k <= 1000) {
+    r1=sample(1:length(tmp1),i)
+    r2=sample(1:length(tmp2),i)
+    tmp_df=genus[c(tmp1[r1],tmp2[r2]),]
+    tmp_df=tmp_df[,colSums(tmp_df)!=0]
+    tmp_meta=metadata[c(tmp1[r1],tmp2[r2]),]
+    tmp_ad=adonis2(tmp_df ~ Death+Age+Gender,tmp_meta,permutations = 1000,method = "bray",by = "margin")
+    d[k,]=c(tmp_ad$R2[1],tmp_ad$F[1],tmp_ad$`Pr(>F)`[1])
+    k=k+1
+  }
+  assign(paste("res_death1",i,sep="_"),d)
+}
+
+res_death1_recovered=data.frame(R2=c(res_death1_10$R2,res_death1_20$R2,res_death1_30$R2,res_death1_40$R2,res_death1_50$R2,res_death1_60$R2,res_death1_70$R2,res_death1_80$R2),
+                                 p=c(res_death1_10$p,res_death1_20$p,res_death1_30$p,res_death1_40$p,res_death1_50$p,res_death1_60$p,res_death1_70$p,res_death1_80$p),
+                                 sample_size=c(rep(c(10,20,30,40,50,60,70,80),each=1000)))
+res_death1_recovered$sample_size=as.factor(res_death1_recovered$sample_size)
+res_death1_recovered$log10p=log10(res_death1_recovered$p)
+
+ggplot(res_death1_recovered,aes(x=sample_size,y=log10p))+geom_boxplot()+
+  stat_smooth(method="loess",aes(group=1))+
+  stat_cor(method = "pearson",aes(x=as.numeric(as.character(sample_size)),y=log10p))+
+  theme_bw()+ylab("log10(p-value)")+xlab("Sample size")+
+  geom_hline(yintercept = log10(0.05),color="red")
+```
+
+
+
+## Alpha diversity
+```{r}
+otu=genus[,metadata1$Sample]
+#chao1&shannon
+otu1= otu_table(as.matrix(otu), taxa_are_rows=T)
+rarefy.physeq<- rarefy_even_depth(otu1,
+                                  sample.size=3000,
+                                  verbose = F,rngseed=711)
+rarefy2 = estimate_richness(rarefy.physeq, split = TRUE,  
+                            measures = c( "Shannon", "Chao1"))
+rarefy2$Sample=rownames(rarefy2)
+
+all=left_join(rarefy2,metadata1)%>%
+  filter(!is.na(Age))%>%
+  separate(new_Sample_ID2,c("patient","part","day"),sep="_",remove = F)%>%
+  mutate(Age_group=ifelse(Age<60,"age<60","age>=60"))%>%
+  dplyr::select(-day)%>%
+  filter(!is.na(Sym2sam))%>%
+  mutate(status=ifelse(grepl("0",Death),"Deceased","Recovered"))%>%
+  mutate(day=ifelse(Sym2sam<=10,"d8",
+                    ifelse(Sym2sam>=11&Sym2sam<=14,"d12",
+                           ifelse(Sym2sam>=15&Sym2sam<=18,"d16",
+                                  ifelse(Sym2sam>=19&Sym2sam<=22,"d20",                                       ifelse(Sym2sam>=23&Sym2sam<=31,"d27","d32"))))))
+all2 <- read.csv("t1_t2.csv")%>%filter(time=="T2")
+a=all%>%
+  left_join(.,all2,by="Sample")%>%
+  dplyr::select(Chao1,Shannon,patient,part,status,Sym2sam,time,Severity_A)%>%
+  filter(Sym2sam<=40)%>%
+  melt(id=c("patient","part","status","Sym2sam","time","Severity_A"))
+names(a)[6] <- "Severity(A)"
+a$time <- as.character(a$time)
+a$time[is.na(a$time)] <- "others"
+a2=a%>%
+  mutate(mark=ifelse(status=="Recovered"&time=="others","Recovered_others",
+                     ifelse(status=="Recovered"&time=="T2","Recovered_T2",
+                            ifelse(status=="Deceased"&time=="others","Deceased_others","Deceased_T2"))))
+a2$patient=factor(a2$patient,levels = unique(a2$patient))
+a2$mark=factor(a2$mark,levels = c("Recovered_others","Recovered_T2","Deceased_others","Deceased_T2"))
+a2$`Severity(A)`=factor(a2$`Severity(A)`,levels = c("3","4","5"))
+a2$status=factor(a2$status,levels =c("Recovered","Deceased"))
+
+table(a2[,c("time","status")])
+table(a2[,c("status","Severity(A)")])
+
+a3=a2%>%filter(variable==unique(a2$variable)[1])
+ggplot(a3,aes(y=value, x=Sym2sam,group=status))+
+  geom_point(size=2,position=position_dodge(width=0.5),aes(color=mark,shape=`Severity(A)`))+
+  geom_smooth(se=F,method = "lm",aes(color=status),size=0.7)+
+  scale_color_manual(values = c("Recovered_others"="#a6cee3","Recovered_T2"="#045a8d",
+                                "Deceased_others"="#fcbba1","Deceased_T2"="#a50f15",
+                                "Recovered"="#045a8d","Deceased"="#a50f15"))+
+  stat_cor(aes(color=status),method = "spearman",label.y.npc =1,label.x.npc =0.75,
+           size=5,show.legend =F)+
+  scale_linetype_manual(values = c(a = "dashed"),guide = FALSE)+
+  theme_bw()+
+  labs(x="Days after symptom onset",y=paste(unique(a2$variable)[1],"Index",sep=" ")) +
+  scale_y_continuous(breaks=seq(0, 400, 100),labels = seq(0, 400, 100), limits=c(0,440))+
+  scale_x_continuous(breaks = seq(0,40,10),labels =seq(0,40,10),limits = c(0,40))+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major=element_blank(),panel.grid.minor=element_blank(),
+    axis.title.x =element_text(size = 20,color="black",face = "bold"),
+    axis.title.y =element_text(size = 20,color="black",face = "bold"),
+    title=element_text(size=25,face="bold"),
+    strip.text.y = element_text(size=20, color="black"),
+    legend.title = element_text(size = 20,color="black"),
+    axis.text.x= element_text(size = 20,color="black"),
+    axis.text.y= element_text(size = 20,color="black"),
+    legend.text = element_text(size = 20,color="black"),legend.position = "right")
+
+
+
+
+```
+
+
+```{r}
+a4=a2%>%filter(variable==unique(a2$variable)[2])
+ ggplot(a4,aes(y=value, x=Sym2sam,group=status))+
+  geom_point(size=1.4,position=position_dodge(width=0.5),aes(color=mark))+
+  geom_smooth(se=F,method = "lm",aes(color=status),size=1)+
+  scale_color_manual(values = c("Recovered_others"="#a6cee3","Recovered_T2"="#045a8d",
+                                "Deceased_others"="#fcbba1","Deceased_T2"="#a50f15",
+                                "Recovered"="#045a8d","Deceased"="#a50f15"))+
+  stat_cor(aes(color=status),method = "spearman",label.y.npc =1,label.x.npc =0.75,
+           size=3,show.legend =F)+
+  scale_linetype_manual(values = c(a = "dashed"),guide = FALSE)+
+  theme_bw()+
+  labs(x="Days after symptom onset",y=paste(unique(a2$variable)[2],"Index",sep=" ")) +
+  scale_y_continuous(breaks=seq(0, 4, 1),labels = seq(0, 4, 1), limits=c(0,4))+
+  scale_x_continuous(breaks = seq(4,38,4),labels =seq(4,38,4),limits = c(0,38.5))+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major=element_blank(),panel.grid.minor=element_blank(),
+    axis.title.x =element_text(size = 20,color="black",face = "bold"),
+    axis.title.y =element_text(size = 20,color="black",face = "bold"),
+    title=element_text(size=25,face="bold"),
+    strip.text.y = element_text(size=20, color="black"),
+    legend.title = element_text(size = 20,color="black"),
+    axis.text.x=element_text(size = 20,color="black"),
+    axis.text.y= element_text(size = 20,color="black"),
+    legend.text = element_text(size = 20,color="black"),legend.position = "right")
+```
+
+
+## Figure 4A/B
+```{r}
+all <- left_join(rarefy2,metadata1)%>%  filter(!is.na(Age))%>%
+  separate(new_Sample_ID,c("patient","part","day"),sep="_",remove = F)%>%
+  group_by(patient)%>%
+  ungroup%>%as.data.frame()%>%
+  select(Sample_ID,Chao1,Shannon,patient,Gender,Age,Treatment,Death,day,sam2adm,Severity_A)%>%
+  arrange(patient,sam2adm)%>%
+  mutate(status=ifelse(grepl("yes",Death),"Deceased","Recovered"))%>%
+  unite("mark",c("patient","sam2adm"),sep="_",remove = F)
+c1=all%>%mutate(status=ifelse(grepl("yes",Death),"Deceased","Recovered"))%>%
+  select(Chao1,Shannon,patient,Sample_ID,status,Severity_A,sam2adm,mark)
+
+a=read.csv("klz_real_species.abundance.csv")%>%
+  select(-taxid)
+a$taxname=as.character(a$taxname)
+rownames(a) <- a$taxname
+
+b1=as.data.frame(t(a[,-1]))
+b1$Sample_ID <- rownames(b1)
+b2=b1%>%select(Sample_ID,everything())
+b3=left_join(c1,b2)
+
+b4=b3%>%unite("sample",c("mark","status"),sep="_",remove = T)%>%
+  select(-Chao1,-Shannon,-Sample_ID,-Severity_A,-sam2adm,-patient)
+rownames(b4) <- b4$sample
+b5=as.data.frame(t(b4[,-1]))
+
+pathogen=c("Influenza A virus","Influenza B virus","influenza C virus",
+           "human respiratory syncytial virus A","human respiratory syncytial virus B",
+           "Human parainfluenza 1 virus","Human parainfluenza 2 virus","Human parainfluenza 3 virus",
+           "Human parainfluenza 4 virus","Human metapneumovirus","Human coronavirus 229E",
+           "Human coronavirus OC43","Human coronavirus NL63","Human coronavirus HKU1",
+           "Human bocavirus","Human adenovirus",
+           "Rhinovirus A","Rhinovirus B","Rhinovirus C",
+           "Enterovirus A","Enterovirus B","Enterovirus C","Enterovirus D",
+           "Mycoplasma pneumonia","Chlamydia pneumoniae","Legionella pneumoniae","Haemophilus influenzae",        
+           "Moraxella catarrhalis","Klebsiella pneumoniae","Streptococcus pneumoniae",           
+           "Staphylococcus aureus","Bordetella pertussis",
+           "Human alphaherpesvirus 1","Human alphaherpesvirus 2",
+           "Mycobacterium tuberculosis","Escherichia coli","Acinetobacter baumannii",            
+           "Pseudomonas aeruginosa", "Pneumocystis jirovecii",
+           "Aspergillus fumigatus",
+           "Cryptococcus neoformans","Salmonella Typhimuriumm",
+           "Serratia marcescens",              
+           "Enterococcus faecium", "Candida albicans","Candida parapsilosis",             
+           "[Candida] glabrata","Candida tropicalis",           
+           "Enterobacter cloacae" ,"Clostridium difficile" ,           
+           "Chlamydophila pneumoniae",
+           "Human mastadenovirus A","Human mastadenovirus B","Human mastadenovirus C",
+           "Human mastadenovirus D","Human mastadenovirus E","Human mastadenovirus F")
+
+
+d1=b5[pathogen,]
+d1$taxname=rownames(d1)
+d2=d1%>%filter(!is.na(P1_1_Recovered))
+
+#health,nc
+e=read.csv("health&nc_real_species.csv")%>%select(-2)
+e$taxname <- as.character(e$taxname)
+which(e$taxname=="Pseudomonas mediterranea")
+e[4835,1]="Pseudomonas mediterranea_1"
+e[4873,1]="Pseudomonas mediterranea_2"
+rownames(e) <- e$taxname
+o1=apply(e[,-1],2,function(x){x/sum(x)}) %>% as.data.frame()
+
+o2=which(apply(o1,1,max) >0.01) %>% names()
+
+o3=e[o2,]
+o4=apply(o3[,-1],2,function(x){x/sum(x)}) %>% as.data.frame()%>%as.data.frame()
+o4$taxname <- rownames(o4)
+o5=select(o4,taxname,everything())
+
+#health
+e2=o5%>%select(taxname,contains("WR"))
+e3 <- e2[e2$taxname %in%d2$taxname,]%>%mutate(median=apply(.[,-1],1,function(x) median(x)))%>%
+  select(taxname,median)
+
+##health's pathogen
+e4=e2[e2$taxname %in% pathogen,]
+
+#nc's pathogen
+nc=o5%>%select(taxname,contains("NC"))
+nc_median <- nc[nc$taxname %in%d2$taxname,]%>%mutate(median=apply(.[,-1],1,function(x) median(x)))%>%
+  select(taxname,median)
+nc1=nc[nc$taxname %in% pathogen,]
+
+#nc,health's median
+median=full_join(e3,nc_median,by="taxname")
+names(median)[2:3] <- c("health_median","nc_median")
+#write.csv(median,"nc&health's median.csv",row.names = F)
+
+##1discover teh pathogens of health and nc
+d3=full_join(e4,nc1,by="taxname")
+d3[is.na(d3)] <- 0
+
+df_hn=data.frame()
+dg_hn=data.frame()
+for (i in 2:ncol(d3)){
+  f1=left_join(d3[,c(1,i)],median)
+  f1$health_median[is.na(f1$health_median)] <- 0.00001
+  f1$nc_median[is.na(f1$nc_median)] <- 0.00001
+  names(f1)[2] <- "value"
+  f2=f1%>%mutate(result1=ifelse(value>0.05,value,0))%>%
+    mutate(health_ratio=value/health_median)%>%
+    mutate(nc_ratio=value/nc_median)%>%
+    filter(result1!=0)%>%filter(health_ratio>=10)%>%
+    filter(nc_ratio>=10)%>%mutate(sample=names(d3)[i])
+  df1=data.frame(sample=names(d3)[i],pathogen_number=nrow(f2))
+  
+  df_hn=rbind(df_hn,df1)
+  dg_hn=rbind(dg_hn,f2)
+}
+df_hn1=df_hn%>%separate("sample",c("patient","day","status"),sep="_",remove = F)%>%
+  mutate(patient=sample,status=ifelse(grepl("NC",sample),"NC","Healthy"))%>%
+  select(patient,status,pathogen_number)%>%filter(status!="NC")
+
+##2##1discover the pathogens of klz
+d4=d2%>%melt()%>%separate("variable",c("patient","day","status"),sep="_",remove = F)
+
+df_klz=data.frame()
+dg_klz=data.frame()
+for (i in 1:length(unique(d4$patient))){
+  f1=d4%>%filter(patient==unique(d4$patient)[i])%>%group_by(taxname)%>%filter(value==max(value))%>%
+    ungroup()%>%as.data.frame()%>%
+    left_join(.,median,by="taxname")
+  f1$health_median[is.na(f1$health_median)] <- 0.0000001
+  f1$nc_median[is.na(f1$nc_median)] <- 0.0000001
+  
+  f2=f1%>%mutate(result1=ifelse(value>0.05,value,0))%>%mutate(health_ratio=value/health_median)%>%
+    mutate(nc_ratio=value/nc_median)%>%
+    filter(result1!=0)%>%filter(health_ratio>=10)%>%filter(nc_ratio>=10)%>%
+    mutate(patient=f1[1,3],status=f1[1,5])
+  
+  
+  f3=f2[!duplicated(f2$taxname),]
+  df1=data.frame(patient=f1[1,3],status=f1[1,5],pathogen_number=length(unique(f2$taxname)))
+  
+  df_klz=rbind(df_klz,df1)
+  dg_klz=rbind(dg_klz,f3)
+}
+
+##infection rate
+g1=df_klz
+table(g1$status)
+g2 <- g1%>%filter(pathogen_number>=1)
+#g2$sample <- factor(g2$sample,levels = unique(g2$sample))
+table(g2$status)
+
+fisher.test(matrix(c(19,39-19,23,153-23),byrow = T,nrow=2))
+table(dg_klz$taxname)
+##plot pathogen number of health,recovered,deceased
+f=rbind(df_hn1,df_klz)%>%
+  filter(status %in% c("Healthy","Recovered", "Deceased"))
+
+f$status=factor(f$status,levels = c("Healthy","Recovered", "Deceased"))
+p1=ggplot(f,aes(x=status,y=pathogen_number,color=status,group=status))+
+  geom_point(size=2,position=position_jitterdodge(jitter.width =0.65,jitter.height  =0.000000000001),alpha=0.4,aes(group=status))+
+  geom_boxplot(outlier.shape = NA,fill=NA)+
+  stat_compare_means(paired = F,method = "wilcox",label.x.npc = 0.5,
+                     label = "p.signif",
+                     comparisons = list(c("Healthy", "Recovered"),c("Recovered", "Deceased"),
+                                        c("Healthy", "Deceased")))+
+  scale_color_manual(values=c(
+    "#4daf4a","#0571b0","#a50f15"))+
+  theme_bw()+
+  labs(y="The number of infection pathogens")+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major=element_blank(),panel.grid.minor=element_blank(),
+    axis.title.x =element_blank(),
+    axis.title.y =element_text(size=15, color="black"),
+    title=element_text(size=15),
+    strip.text.y = element_text(size=15, color="black"),
+    strip.text.x = element_text(size=15, color="black"),
+    legend.title = element_blank(),
+    axis.text.x= element_text(size = 15,color="black"),
+    axis.text.y= element_text(size = 15,color="black"),
+    legend.text = element_text(size = 15,color="black"),legend.position ="right")
+
+```
+
+## Figure 4b
+```{r}
+#fish.test of every pathogen in nc,health,klz
+g3_klz=dg_klz%>%select(taxname,patient,value,status)
+
+g3_hn=dg_hn%>%select(taxname,sample,value)%>%
+  mutate(status=ifelse(grepl("NC",sample),"NC","Healthy"))%>%filter(status!="NC")
+names(g3_hn)[2] <- "patient"
+
+g3=rbind(g3_klz,g3_hn)
+
+g4 <- table(g3[,c("taxname","status")])%>%as.data.frame()%>%
+  mutate(frequency=ifelse(status=="Deceased",Freq/39,
+                          ifelse(status=="Recovered",Freq/153,
+                                 ifelse(status=="Healthy",Freq/84,Freq/17))))%>%
+  arrange(desc(frequency))
+
+freq=g4%>%
+  select(taxname,status,Freq)%>%
+  mutate(not_the_tax=ifelse(grepl("Recovered",status),153-Freq,
+                            ifelse(grepl("Deceased",status),39-Freq,84-Freq)))%>%
+  select(taxname,Freq,not_the_tax,status)
+
+
+sig=data.frame()
+i=1
+for (i in 1:length(unique(freq$taxname))){
+  freq1=freq%>%filter(taxname==unique(freq$taxname)[i])
+  freq2=left_join(data.frame(status=c("Healthy","Recovered","Deceased")),freq1)
+  test1=fisher.test(freq2[c(2:3),3:4])
+  test2=fisher.test(freq2[c(1,3),3:4])
+  test3=fisher.test(freq2[c(1,2),3:4])
+  sig[i,1]=freq2[1,2]
+  sig[i,2]=test1$p.value
+  sig[i,3]=test2$p.value
+  sig[i,4]=test3$p.value
+}
+names(sig) <- c("taxname","death-Recovered","health-death","health-Recovered")
+sig1=melt(sig)%>%mutate(mark=ifelse(value>0&value<0.001,"***",
+                                    ifelse(value>=0.001&value<0.01,"**",
+                                           ifelse(value>=0.01&value<0.05,"*",""))))
+#sig1$p <- p.adjust(sig1$value,method = "fdr",n = length(sig1$value))
+
+
+rel=g3%>%group_by(taxname,status)%>%mutate(median=median(value))%>%select(-patient)%>%
+  unite("mark",c("taxname","status"),remove = F)%>%
+  .[!duplicated(.$mark),]%>%select(-mark)
+
+#i=10
+abundance_sig=data.frame()
+for (i in 1:length(unique(g3$taxname))){
+  x1=g3%>%filter(taxname==unique(g3$taxname)[i])%>%filter(status=="Recovered")
+  x2=g3%>%filter(taxname==unique(g3$taxname)[i])%>%filter(status=="Deceased")
+  p=wilcox.test(x1$value,x2$value,paired = F)
+  abundance_sig[i,1]=unique(g3$taxname)[i]
+  abundance_sig[i,2]=p$p.value
+}
+
+
+df=left_join(g4,rel,by=c("taxname","status"))
+df[is.na(df)] <- 0
+order=df%>%filter(status=="Deceased")%>%arrange(desc(frequency))
+order1=as.character(order$taxname)
+df$taxname=factor(df$taxname,levels = order1)
+df$status <- factor(df$status,levels=c("Healthy","Recovered","Deceased"))
+
+
+ggplot(df)+
+  geom_bar(aes(x=taxname,y=frequency,color=status),stat='identity',position="dodge",
+           width=0.8,fill=NA,lwd=1)+
+  geom_point(aes(x=taxname,y=median/3.5,color=status),
+             position = position_dodge(width = 0.8),shape=17,size=2)+
+  scale_fill_manual(values=c("#4daf4a","#0571b0","#a50f15"))+
+  scale_color_manual(values=c("#4daf4a","#0571b0","#a50f15"))+
+  theme_bw()+
+  labs(y="The rate of infection pathogens")+
+  scale_y_continuous(breaks = seq(0.0,0.3,0.1),labels =seq(0.0,0.3,0.1), limits = c(0,0.31),
+                     sec.axis = sec_axis(~ .*3.5,name="Relative abundance",
+                                         breaks = seq(0.0,1.0,0.25),labels = seq(0.0,1.0,0.25)))+
+  theme(
+    
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major=element_blank(),panel.grid.minor=element_blank(),
+    axis.title.x =element_blank(),
+    axis.title.y =element_text(size=15, color="black"),
+    title=element_text(size=15),
+    strip.text.y = element_text(size=15, color="black"),
+    strip.text.x = element_text(size=15, color="black"),
+    legend.title = element_blank(),
+    axis.text.x= element_text(size = 10,color="black",angle=45,hjust=1),
+    axis.text.y= element_text(size = 15,color="black"),
+    legend.text = element_text(size = 15,color="black"),legend.position ="top")
+```
+## Figure 4c
+```{r}
+all <- read.csv("t1_t2.csv")
+meta <- left_join(rarefy2,metadata1)%>%
+  filter(!is.na(Age))%>%
+  separate(new_Sample_ID,c("patient","part","day"),sep="_",remove = F)
+
+df1=left_join(all,meta[,c("Sample_ID","patient")])%>%
+  group_by(patient)%>%mutate(count=n())%>%
+  ungroup%>%as.data.frame()%>%
+  filter(count>=2)%>%
+  group_by(Sample_ID)%>%mutate(count2=n())%>%ungroup%>%
+  as.data.frame()%>%filter(count2==1)%>%select(-count2)
+
+df2=df1%>%left_join(.,meta,by=c("Sample_ID","patient"))%>%
+  select(Sample_ID,patient,Death,time)%>%
+  arrange(patient,time)%>%
+  mutate(status=ifelse(grepl("yes",Death),"Deceased","Recovered"))%>%
+  select(patient,Sample_ID,status,time)
+
+real=read.csv("klz_real_species.abundance.csv")%>%
+  filter(taxname%in%c("Enterococcus faecium","Candida albicans"))
+rownames(real) <- real$taxname
+real1=t(real[,-1])%>%as.data.frame()
+real1$Sample_ID <- rownames(real1)
+
+a=left_join(real1,df2,by="Sample_ID")%>%select(-Sample_ID)%>%
+  filter(!is.na(status))%>%melt()%>%
+  unite("mark",c("status","time"),remove = F)
+
+a$variable <- as.character(a$variable)
+a$variable[a$variable=="Enterococcus.faecium"] <- "Enterococcus faecium"
+a$variable[a$variable=="Candida.albicans"] <- "Candida albicans"
+a$time=factor(a$time,levels = c("T1","T2"))
+a$status=factor(a$status,levels = c("Recovered","Deceased"))
+a$variable <- factor(a$variable,levels = c("Candida albicans","Enterococcus faecium"))
+a$patient=factor(a$patient,levels = unique(a$patient))
+a$mark=factor(a$mark,levels = c("Recovered_T1", "Recovered_T2","Deceased_T1", "Deceased_T2"))
+com1=list(c("Recovered_T1", "Recovered_T2"),c("Deceased_T1", "Deceased_T2"))
+com2=list(c("Recovered_T1", "Deceased_T1"),c("Recovered_T2","Deceased_T2"))
+ ggplot(a,aes(y=log10(value+0.00001), x=mark,color=status))+
+  geom_point(size=1,aes(group=patient),alpha=0.4)+
+  geom_line(aes(group=patient),size=0.02,linetype="dotted")+
+  geom_boxplot(fill=NA,outlier.shape = NA)+
+  scale_color_manual(values = c("#0571b0","#a50f15"))+
+  theme_bw()+
+  facet_grid(.~variable,scales = "free",switch="y")+
+  stat_compare_means(comparisons = com1,paired = T,label.y.npc = 1,label.x.npc = 0.2,method = "wilcox.test",label = "p.signif",
+                     size=4)+
+  stat_compare_means(comparisons = com2,paired = F,label.y.npc = 1,label.x.npc = 0.2,method = "wilcox.test",label = "p.signif",size=4)+
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major=element_blank(),panel.grid.minor=element_blank(),
+    axis.title.x =element_blank(),
+    axis.title.y =element_blank(),
+    title=element_text(size=25,face="bold"),
+    strip.text.y = element_text(size=15, color="black",face = "bold"),
+    strip.text.x = element_text(size=15, color="black",face = "bold"),
+    legend.title = element_blank(),
+    axis.text.x= element_text(size = 15,color="black",angle = 45,hjust=1),
+    axis.text.y= element_text(size = 15,color="black"),
+    legend.text = element_text(size = 15,color="black"),legend.position ="top")
+```
+
+##fig4e
+```{r}
+a1=read.csv("Enterococcus.faecium_realspecies.csv")%>%
+  unite("mark",c("taxid","taxname"),sep="_")%>%
+  select(mark,contains("PL"),contains("AS"))
+colnames(a1) <- gsub(".blastTAB","",colnames(a1))
+
+a3.1=read.csv("Enterococcus.faecium_realspecies.csv")%>%
+  select(taxid,taxname)
+
+
+a3=read.csv("klz_real_species.abundance.csv")%>%
+  unite("mark",c("taxid","taxname"),sep="_")
+
+a=full_join(a1,a3)
+a[is.na(a)] <- 0
+
+rownames(a) <- a$mark
+
+b1=apply(a[,-1],2,function(x){x/sum(x)}) %>% as.data.frame()
+
+b2=b1["1352_Enterococcus faecium",]%>%t(.)%>%as.data.frame()
+b2$Sample_ID=rownames(b2)
+
+b3=b2%>%mutate(region=ifelse(grepl("TS",Sample_ID),"TS",
+                             ifelse(grepl("AS",Sample_ID),"AS","PL")))%>%
+  mutate(Num=readr::parse_number(Sample_ID))%>%
+  unite("mark",c("region","Num"),sep="_")
+
+meta1=read.csv("klz_metadata_TS.PL.AS.csv",stringsAsFactors = FALSE)%>%
+  select(id,region,sam2adm,patient,death)%>%
+  mutate(Num=readr::parse_number(id))%>%
+  unite("mark",c("region","Num"),sep="_",remove = F)%>%
+  unite("new_sample_id",c("patient","sam2adm"),sep="_",remove = F)%>%
+  select(-id)
+meta_uniq=meta1%>%filter(!is.na(death))%>%.[!duplicated(.$patient),]%>%select(patient,death)
+meta=left_join(meta1,meta_uniq,by="patient")%>%select(-death.x)
+names(meta)[ncol(meta)] <- "death"
+
+b4=left_join(b3,meta,by="mark")%>%filter(!is.na(new_sample_id))
+
+b5=b4%>%group_by(new_sample_id)%>%summarise(count=n())%>%filter(count>=3)
+
+b6=b4%>%filter(new_sample_id %in% b5$new_sample_id)%>%
+  filter(!is.na(new_sample_id))%>%
+  filter(Sample_ID!="KLZ_PL587")%>%
+  filter(new_sample_id!="58_1")
+
+
+region=c("AS","PL","TS")
+df=data.frame()
+i=1
+for (i in 1:length(unique(b6$new_sample_id))){
+  c1=b6%>%filter(new_sample_id==unique(b6$new_sample_id)[i])
+  if (length(intersect(region,c1$region))==3){
+    df=rbind(df,c1)
+  }
+}
+
+df1=df%>%select(region,new_sample_id,`1352_Enterococcus faecium`)%>%
+  spread(region,`1352_Enterococcus faecium`)
+
+
+
+cor(df1$AS,df1$PL)
+cor(df1$AS,df1$TS)
+cor(df1$PL,df1$TS)
+
+
+
+#cor：
+ggplot(df1,aes(x=AS,y=TS))+geom_point()+stat_cor(size=5)
+ggplot(df1,aes(x=AS,y=PL))+geom_point()+stat_cor(size=5)
+ggplot(df1,aes(x=TS,y=PL))+geom_point()+stat_cor(size=5)
+unique(df1$mark)
+
+library("plot3D")
+x=df1$AS
+y=df1$PL
+z=df1$TS
+pdf("fig4e.pdf",5,6)
+scatter3D(x,y,z,pch=19, main = "Relative abundance of Enterococcus faecium",
+          phi = 0,side = 1, cex=1,bty="g",type="h",col="firebrick3",
+          addlines = TRUE, length = 0.5, width = 0.5,colkey = FALSE,nticks=5,
+          ticktype = "detailed",font=1,xlim = c(0, 1), ylim = c(0, 1),
+          xlab="Anal swab",ylab="Plasma",zlab="Oropharyngeal swab",zlim =c(0, 1))
+dev.off()
+
+```
+
+
+### Fig. S5 network
+```{r,echo=TRUE,tidy=TRUE}
+ll=metadata %>% filter(is.na(Death),reads_gthan3000=="yes") %>% rownames()
+ll=ll[-3]
+nc=species[species_list$real_taxname,ll] %>% na.omit()
+#nc_network use for filtering
+net.nc <- spiec.easi(nc %>% t(), method='mb', lambda.min.ratio=1e-2,
+                     nlambda=20, pulsar.params=list(rep.num=50))
+weights.nc <- Matrix::summary(t(symBeta(getOptBeta(net.nc), mode='maxabs')))[,3]
+ig.nc <- adj2igraph(getRefit(net.nc),
+                    diag = F,
+                    edge.attr=list(weight=weights.nc),
+                    vertex.attr = list(name = colnames(nc %>% t())))
+edge_nc =cbind(get.edgelist(ig.nc),weights.nc)
+
+genus=read.csv("Data/genus1.csv",row.names = 1)
+genus_A=genus[rownames(genus_A),names(genus_A)]
+genus_D=genus[rownames(genus_D),names(genus_D)]
+
+#mark the node
+genus=apply(genus,2,function(x){x/sum(x)})
+node_mark= rownames(genus)[apply(genus,1,max)>0.1]
+
+death_count_t1=genus_A[,map_A$Sample[map_A$Death==1]] %>% t()
+death_count_t1=death_count_t1[,colSums(death_count_t1)!=0]
+death_count_t2=genus_D[,map_D$Sample[map_D$Death==1]] %>% t()
+death_count_t2=death_count_t2[,colSums(death_count_t2)!=0]
+alive_count_t1=genus_A[,map_A$Sample[map_A$Death==0]] %>% t()
+alive_count_t1=alive_count_t1[,colSums(alive_count_t1)!=0]
+alive_count_t2=genus_D[,map_D$Sample[map_D$Death==0]] %>% t()
+alive_count_t2=alive_count_t2[,colSums(alive_count_t2)!=0]
+#death T1
+death.t1 <- spiec.easi(death_count_t1, method='mb', lambda.min.ratio=1e-2,
+                       nlambda=20, pulsar.params=list(rep.num=50))
+weights.death.t1 <- Matrix::summary(symBeta(getOptBeta(death.t1), mode='maxabs'))[,3]
+ig.death.t1 <- adj2igraph(getRefit(death.t1),
+                          diag = F,
+                          edge.attr=list(weight=weights.death.t1),
+                          vertex.attr = list(name = colnames(death_count_t1))
+)
+edge.death.t1=cbind(get.edgelist(ig.death.t1),weights.death.t1) %>% as.data.frame()
+V(ig.death.t1)$label=""
+V(ig.death.t1)$label[V(ig.death.t1)$name %in% node_mark]=node_mark
+V(ig.death.t1)$color="grey70"
+V(ig.death.t1)$color[V(ig.death.t1)$name %in% Archaea]="#d7191c"
+V(ig.death.t1)$color[V(ig.death.t1)$name %in% Bacteria]="#fdae61"
+V(ig.death.t1)$color[V(ig.death.t1)$name %in% Eukaryota]="#abd9e9"
+V(ig.death.t1)$color[V(ig.death.t1)$name %in% Viruses]="#2c7bb6"
+V(ig.death.t1)$color[V(ig.death.t1)$name %in% core]="#e34a33"
+E(ig.death.t1)$color="black"
+E(ig.death.t1)$color[E(ig.death.t1)$weight<0]="#008040"
+E(ig.death.t1)$width=abs(E(ig.death.t1)$weight)*10 %>% log()
+
+#death T2
+death.t2 <- spiec.easi(death_count_t2, method='mb', lambda.min.ratio=1e-2,
+                       nlambda=20, pulsar.params=list(rep.num=50))
+weights.death.t2 <- Matrix::summary(t(symBeta(getOptBeta(death.t2), mode='maxabs')))[,3]
+ig.death.t2 <- adj2igraph(getRefit(death.t2),
+                          diag = F,
+                          edge.attr=list(weight=weights.death.t2),
+                          vertex.attr = list(name = colnames(death_count_t2)))
+
+V(ig.death.t2)$label=""
+V(ig.death.t2)$label[V(ig.death.t2)$name %in% node_mark]=node_mark
+V(ig.death.t2)$color="grey70"
+V(ig.death.t2)$color[V(ig.death.t2)$name %in% Archaea]="#d7191c"
+V(ig.death.t2)$color[V(ig.death.t2)$name %in% Bacteria]="#fdae61"
+V(ig.death.t2)$color[V(ig.death.t2)$name %in% Eukaryota]="#abd9e9"
+V(ig.death.t2)$color[V(ig.death.t2)$name %in% Viruses]="#2c7bb6"
+V(ig.death.t2)$color[V(ig.death.t2)$name %in% core]="#e34a33"
+E(ig.death.t2)$color="black"
+E(ig.death.t2)$color[E(ig.death.t2)$weight<0]="#008040"
+E(ig.death.t2)$width=abs(E(ig.death.t2)$weight)*10 %>% log()
+
+#alive T1
+alive.t1 <- spiec.easi(alive_count_t1, method='mb', lambda.min.ratio=1e-2,
+                       nlambda=20, pulsar.params=list(rep.num=50))
+weights.alive.t1 <- Matrix::summary(t(symBeta(getOptBeta(alive.t1), mode='maxabs')))[,3]
+ig.alive.t1 <- adj2igraph(getRefit(alive.t1),
+                          diag = F,
+                          edge.attr=list(weight=weights.alive.t1),
+                          vertex.attr = list(name = colnames(alive_count_t1)))
+
+V(ig.alive.t1)$label=""
+V(ig.alive.t1)$label[V(ig.alive.t1)$name %in% node_mark]=node_mark
+V(ig.alive.t1)$color="grey70"
+V(ig.alive.t1)$color[V(ig.alive.t1)$name %in% Archaea]="#d7191c"
+V(ig.alive.t1)$color[V(ig.alive.t1)$name %in% Bacteria]="#fdae61"
+V(ig.alive.t1)$color[V(ig.alive.t1)$name %in% Eukaryota]="#abd9e9"
+V(ig.alive.t1)$color[V(ig.alive.t1)$name %in% Viruses]="#2c7bb6"
+V(ig.alive.t1)$color[V(ig.alive.t1)$name %in% core]="#e34a33"
+E(ig.alive.t1)$color="black"
+E(ig.alive.t1)$color[E(ig.alive.t1)$weight<0]="#008040"
+E(ig.alive.t1)$width=abs(E(ig.alive.t1)$weight)*10 %>% log()
+
+#alive T2
+alive.t2 <- spiec.easi(alive_count_t2, method='mb', lambda.min.ratio=1e-2,
+                       nlambda=20, pulsar.params=list(rep.num=50))
+weights.alive.t2 <- Matrix::summary(t(symBeta(getOptBeta(alive.t2), mode='maxabs')))[,3]
+ig.alive.t2 <- adj2igraph(getRefit(alive.t2),
+                          diag = F,
+                          edge.attr=list(weight=weights.alive.t2),
+                          vertex.attr = list(name = colnames(alive_count_t2)))
+
+V(ig.alive.t2)$label=""
+V(ig.alive.t2)$label[V(ig.alive.t2)$name %in% node_mark]=node_mark
+V(ig.alive.t2)$color="grey70"
+V(ig.alive.t2)$color[V(ig.alive.t2)$name %in% Archaea]="#d7191c"
+V(ig.alive.t2)$color[V(ig.alive.t2)$name %in% Bacteria]="#fdae61"
+V(ig.alive.t2)$color[V(ig.alive.t2)$name %in% Eukaryota]="#abd9e9"
+V(ig.alive.t2)$color[V(ig.alive.t2)$name %in% Viruses]="#2c7bb6"
+V(ig.alive.t2)$color[V(ig.alive.t2)$name %in% core]="#e34a33"
+E(ig.alive.t2)$color="black"
+E(ig.alive.t2)$color[E(ig.alive.t2)$weight<0]="#008040"
+E(ig.alive.t2)$width=abs(E(ig.alive.t2)$weight)*10 %>% log()
+
+death.t1.vsize    <- rowMeans(clr(death_count_t1, 1))+5
+death.t1.coord <- layout.fruchterman.reingold(adj2igraph(getRefit(death.t1),
+                                                         vertex.attr = list(name = colnames(death_count_t1))))
+
+death.t2.vsize    <- rowMeans(clr(death_count_t2, 1))+5
+death.t2.coord <- layout.fruchterman.reingold(adj2igraph(getRefit(death.t2),
+                                                         vertex.attr = list(name = colnames(death_count_t2))))
+
+alive.t1.vsize    <- rowMeans(clr(alive_count_t1, 1))+5
+alive.t1.coord <- layout.fruchterman.reingold(adj2igraph(getRefit(alive.t1),
+                                                         vertex.attr = list(name = colnames(alive_count_t1))))
+
+alive.t2.vsize    <- rowMeans(clr(alive_count_t2, 1))+5
+alive.t2.coord <- layout.fruchterman.reingold(adj2igraph(getRefit(alive.t2),
+                                                         vertex.attr = list(name = colnames(alive_count_t2))))
+######mark the edge in NC
+edge.death.t1=cbind(get.edgelist(ig.death.t1),weights.death.t1) %>% as.data.frame()
+edge.death.t2=cbind(get.edgelist(ig.death.t2),weights.death.t2) %>% as.data.frame()
+edge.alive.t1=cbind(get.edgelist(ig.alive.t1),weights.alive.t1) %>% as.data.frame()
+edge.alive.t2=cbind(get.edgelist(ig.alive.t2),weights.alive.t2) %>% as.data.frame()
+nc_a1=inner_join(edge.alive.t1 %>% as.data.frame(),edge_nc[,1:2] %>% as.data.frame(),
+                 by=c("V1","V2"))
+nc_a2=inner_join(edge.alive.t2 %>% as.data.frame(),edge_nc[,1:2] %>% as.data.frame(),
+                 by=c("V1","V2"))
+nc_d1=inner_join(edge.death.t1 %>% as.data.frame(),edge_nc[,1:2] %>% as.data.frame(),
+                 by=c("V1","V2"))
+nc_d2=inner_join(edge.death.t2 %>% as.data.frame(),edge_nc[,1:2] %>% as.data.frame(),
+                 by=c("V1","V2"))
+###标记nc
+E(ig.death.t1)$lty=1
+E(ig.death.t1)$lty[paste(get.edgelist(ig.death.t1)[,1],get.edgelist(ig.death.t1)[,2]) %in%
+                     paste(nc_d1[,1],nc_d1[,2])]=2
+E(ig.death.t2)$lty=1
+E(ig.death.t2)$lty[paste(get.edgelist(ig.death.t2)[,1],get.edgelist(ig.death.t2)[,2]) %in%
+                     paste(nc_d2[,1],nc_d2[,2])]=2
+E(ig.alive.t1)$lty=1
+E(ig.alive.t1)$lty[paste(get.edgelist(ig.alive.t1)[,1],get.edgelist(ig.alive.t1)[,2]) %in%
+                     paste(nc_a1[,1],nc_a1[,2])]=2
+E(ig.alive.t2)$lty=1
+E(ig.alive.t2)$lty[paste(get.edgelist(ig.alive.t2)[,1],get.edgelist(ig.alive.t2)[,2]) %in%
+                     paste(nc_a2[,1],nc_a2[,2])]=2
+#######
+par(mfrow=c(2,2))
+plot.igraph(ig.death.t1,layout=death.t1.coord, vertex.size=death.t1.vsize,
+            vertex.label.cex=0.8,
+            vertex.frame.color="grey70",
+            vertex.label.color="black",main="Death T1")
+
+plot(ig.death.t2,layout=death.t2.coord, vertex.size=death.t2.vsize, 
+     vertex.label.cex=0.8,
+     vertex.frame.color="grey70",
+     vertex.label.color="black",main="Death T2") 
+
+
+plot.igraph(ig.alive.t1,layout=alive.t1.coord, vertex.size=alive.t1.vsize,
+            vertex.label.cex=0.8,
+            vertex.frame.color="grey70",
+            vertex.label.color="black",main="Alive T1")
+
+plot(ig.alive.t2,layout=alive.t2.coord, vertex.size=alive.t2.vsize, 
+     vertex.label.cex=0.8,
+     vertex.frame.color="grey70",
+     vertex.label.color="black",main="Alive T2") 
+
+
+##network analysis
+#ACC
+average_clustering_coefficient <- vector()
+average_clustering_coefficient[1]=transitivity(ig.death.t1, type = "average")
+average_clustering_coefficient[2]=transitivity(ig.death.t2, type = "average")
+average_clustering_coefficient[3]=transitivity(ig.alive.t1, type = "average")
+average_clustering_coefficient[4]=transitivity(ig.alive.t2, type = "average")
+average_clustering_coefficient=data.frame(average_clustering_coefficient=average_clustering_coefficient,
+                                          Outcome=c("Death","Death","Alive","Alive"),
+                                          Time=c("T1","T2","T1","T2"))
+#density
+density=vector()
+density[1]=graph.density(ig.death.t1)
+density[2]=graph.density(ig.death.t2)
+density[3]=graph.density(ig.alive.t1)
+density[4]=graph.density(ig.alive.t2)
+density=data.frame(density=density,
+                   Outcome=c("Death","Death","Alive","Alive"),
+                   Time=c("T1","T2","T1","T2"))
+density$Outcome=as.factor(density$Outcome)
+ggplot(density,aes(x=Outcome,y=density))+
+  geom_bar(aes(fill=Time),stat="identity",position="dodge",alpha=0.7)+theme_bw()+
+  scale_fill_lancet()+
+  ylab("Density")+xlab("")
+
+ggplot(average_clustering_coefficient,aes(x=Outcome,y=average_clustering_coefficient))+
+  geom_bar(aes(fill=Time),stat="identity",position="dodge",alpha=0.7)+theme_bw()+
+  scale_fill_lancet()+
+  ylab("Average Clustering Coefficient")
+```
+
+## healthy network
+```{r,echo=TRUE,tidy=TRUE}
+net.hc <- spiec.easi(hc %>% t(), method='mb', lambda.min.ratio=1e-2,
+                     nlambda=20, pulsar.params=list(rep.num=50))
+weights.hc <- Matrix::summary(t(symBeta(getOptBeta(net.hc), mode='maxabs')))[,3]
+ig.hc <- adj2igraph(getRefit(net.hc),
+                    diag = F,
+                    edge.attr=list(weight=weights.hc),
+                    vertex.attr = list(name = colnames(hc %>% t())))
+edge_hc =cbind(get.edgelist(ig.hc),weights.hc)
+
+V(ig.hc)$label=""
+V(ig.hc)$label[V(ig.hc)$name %in% node_mark]=node_mark
+V(ig.hc)$color="grey70"
+V(ig.hc)$color[V(ig.hc)$name %in% Archaea]="#d7191c"
+V(ig.hc)$color[V(ig.hc)$name %in% Bacteria]="#fdae61"
+V(ig.hc)$color[V(ig.hc)$name %in% Eukaryota]="#abd9e9"
+V(ig.hc)$color[V(ig.hc)$name %in% Viruses]="#2c7bb6"
+V(ig.hc)$color[V(ig.hc)$name %in% core]="#e34a33"
+E(ig.hc)$color="black"
+E(ig.hc)$color[E(ig.hc)$weight<0]="#008040"
+E(ig.hc)$width=abs(E(ig.hc)$weight)*10 %>% log()
+
+net.hc.vsize    <- rowMeans(clr(hc %>% t(), 1))+4
+net.hc.coord <- layout.fruchterman.reingold(adj2igraph(getRefit(net.hc),
+                                                       vertex.attr = list(name = colnames(hc %>% t()))))
+E(ig.hc)$lty=1
+nc_hc=inner_join(edge_hc %>% as.data.frame(),edge_nc[,1:2] %>% as.data.frame(),
+                 by=c("V1","V2"))
+E(ig.hc)$lty[paste(get.edgelist(ig.hc)[,1],get.edgelist(ig.hc)[,2]) %in%
+                     paste(nc_hc[,1],nc_hc[,2])]=2
+plot(ig.hc,layout=net.hc.coord,vertex.size=net.hc.vsize,
+     vertex.label.cex=0.8,
+     vertex.frame.color="grey70",
+     vertex.label.color="black",main="HC")
+
+graph.density(ig.hc)
+
+```
+
+### Part2  RNAseq analysis
+```{r,echo=TRUE,fig.show='hold',fig.width=6,fig.height=2}
+df3=read.delim("all_gene.tsv",row.names = 1)
+library('AnnotationDbi')
+library('org.Hs.eg.db')
+library(tidyverse)
+library(edgeR)
+df3=df3[rowSums(df3>1)>5,colSums(df3)>100000]
+## ll1  >100000   ll3 >300000   ll5>50000
+ll=intersect(colnames(df3),rownames(map_A)) #%>% c(.,ll1[100:102])
+# ll=c(intersect(ll5,new_t2_list$T2),ll5[175:180])
+# All gene count noramlization
+S_raw <- df3[rowSums(df3)>10,ll]
+dge <- DGEList(counts=S_raw)
+
+comp2groups <- list(Recovered_Deceased=c("Deceased","Recovered") )
+DEA_list <- list()
+
+for (comp_var in names(comp2groups) ) {
+  # comp_var <- names(comp2groups)[[1]]
+  comp_i <- comp2groups[[comp_var]]
+  print (comp_i)
+  sample_meta=metadata[ll,]
+  subsample_pheno <- dplyr::filter(sample_meta, Group %in% comp_i )
+  #subsample_pheno$Group[!grepl("Healthy",subsample_pheno$Group)]="nCOV"
+  subsample_pheno$Group <- factor(subsample_pheno$Group, levels=comp_i )
+  Expdesign <- model.matrix(~subsample_pheno$Group)
+  
+  subsample_dge <- dge[,subsample_pheno$Sample_ID2]
+  
+  # DEA
+  keep <- filterByExpr(subsample_dge, Expdesign)
+  subsample_dge <- subsample_dge[keep,keep.lib.sizes=FALSE]
+  subsample_dge <- calcNormFactors(subsample_dge)
+  
+  v <- voom(subsample_dge, Expdesign, plot=FALSE, normalize="quantile")
+  
+  # boxplot(v$E[,nCoV_samp])
+  # boxplot(v$E)
+  
+  Expfit1 <- lmFit(v, Expdesign)
+  Expfit2 <- eBayes(Expfit1)
+  limma_res <- topTable(Expfit2, coef=tail(colnames(Expdesign), 1), number=Inf) %>% 
+    tibble::rownames_to_column(var=comp_var )
+  
+  limma_DEA <- dplyr::filter(limma_res, adj.P.Val<=0.05, abs(logFC)>=1.5)
+  #readr::write_tsv(limma_DEA, paste0("../results/", comp_var, "_limma_res.tsv") )
+  
+  limma_UP <- dplyr::filter(limma_DEA, logFC>0)[[comp_var]]
+  limma_DN <- dplyr::filter(limma_DEA, logFC<0)[[comp_var]]
+  
+  limma_DEG <- limma_DEA[[comp_var]]
+  print(length(limma_DEG))
+  limma_DE <- v$E[limma_DEG,]
+  
+  
+  DEA_list[["limma_res"]][[comp_var]] <- limma_res
+  DEA_list[["limma_DEA"]][[comp_var]] <- limma_DEA
+  DEA_list[["limma_DEG"]][[comp_var]] <- limma_DEG
+  DEA_list[["limma_UPDN"]][[paste0(comp_var, "_UP")]] <- limma_UP
+  DEA_list[["limma_UPDN"]][[paste0(comp_var, "_DN")]] <- limma_DN
+  DEA_list[["limma_DE"]][[comp_var]] <- limma_DE
+  DEA_list[["subsample_pheno"]][[comp_var]] <- subsample_pheno
+  
+}
+
+library(clusterProfiler)
+gene<-DEA_list$limma_DEG$Recovered_Deceased
+gene.df<-bitr(gene, fromType = "SYMBOL", 
+              toType = c("SYMBOL","ENTREZID","ENSEMBL"),
+              OrgDb = org.Hs.eg.db)
+
+#Go enrichment
+ego_bp<-enrichGO(gene       = gene.df$ENTREZID %>% unique(),
+                 OrgDb      = org.Hs.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "BP",
+                 pAdjustMethod = "BH",
+                 pvalueCutoff = 0.01,
+                 qvalueCutoff = 0.05)
+
+#### Enrichment GO pathway
+barplot(ego_bp,showCategory = 15,title="The GO_BP enrichment analysis of all DEGs ")+ 
+  scale_size(range=c(2, 12))+
+  scale_x_discrete(labels=function(ego_bp) str_wrap(ego_bp,width = 20))
+
+
+
+```
+
+## Fig S6A
+```{r,echo=TRUE,tidy=TRUE,fig.show='hold',fig.width=7, fig.height=9}
+df=v$E[DEA_list$limma_DEG$Recovered_Deceased,] %>% melt()
+colnames(df)=c("symbol","Sample","value")
+df1=right_join(subsample_pheno,df)
+ggboxplot(df1,"Group","value",facet.by = "symbol",fill = "Group",
+          palette = Death_color[c(3,2)],add = "jitter",width = 0.5)+
+  ylab("Normalized gene expression")+xlab("")+theme_cleveland()
+```
+
